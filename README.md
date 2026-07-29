@@ -28,7 +28,7 @@ knowbase status
 
 | 命令 | 作用 |
 |---|---|
-| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--write-claude-md]` | 一次性接入，注册开机自启并启动守护进程 |
+| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--no-agent-config]` | 一次性接入，注册开机自启，并自动配置 Claude Code / Codex 全局提示词 |
 | `knowbase status` | 一屏健康度：守护进程 / 上次同步 / 未推送改动 / 冲突副本 / 远端连通性 |
 | `knowbase sync` | 立即触发一次同步周期（前台输出，用于排查和急用） |
 | `knowbase pause` | 暂停自动同步（大范围改动期间用，避免半成品被提交） |
@@ -44,9 +44,29 @@ knowbase status
 1. **union 合并**（覆盖约 95%）：仓库 `.gitattributes` 中 `*.md merge=union`，两端改同一区域时双方的行都保留。「乱但都在」优于「整齐但丢了」。
 2. **冲突副本兜底**（union 覆盖不到的非 md 文件）：本地版本另存为 `原名.conflict-主机名-时间戳.扩展名`，原文件采用远端版本，两者一并提交推送，随同步扩散到所有设备，事后由人或 AI 合并。
 
-## 与 AI agent 集成
+## 与 AI agent 集成（自动）
 
-`init` 会输出一段可粘贴到 `CLAUDE.md` / `AGENTS.md` 的集成片段（或用 `--write-claude-md` 直接写入知识库目录），告诉 agent 知识库位置与读写/暂停约定。
+`init` 会**自动**把一段知识库使用说明写入你本机各 AI agent 的**全局提示词**文件，让 agent 天然知道「组织知识库在哪、怎么读写」，无需你手动粘贴：
+
+| Agent | 全局提示词文件 |
+|---|---|
+| Claude Code | `~/.claude/CLAUDE.md` |
+| Codex | `~/.codex/AGENTS.md` |
+
+写入的内容是一个带标记的**托管区块**：
+
+```markdown
+<!-- KNOWBASE:START （由 knowbase 自动管理，勿手动编辑本区块） -->
+## 组织知识库（knowbase）
+本机知识库位于：`~/org-kb`
+...（读写 / 暂停约定）...
+<!-- KNOWBASE:END -->
+```
+
+- **幂等**：重复 `init` 只会原地更新该区块，不会重复堆叠。
+- **不侵入**：只在文件末尾追加/更新自己的区块，你在同一文件里的其他内容原样保留。
+- **可逆**：`knowbase uninstall` 会精确移除该区块，并保留你的其他内容。
+- 不想自动写入：`init` 时加 `--no-agent-config`。
 
 ## 开机自启机制
 
@@ -65,6 +85,8 @@ knowbase status
 ~/.config/knowbase/knowbase.log       # 滚动日志（status 报错时引导看这里）
 ~/.config/knowbase/daemon.state.json  # 守护进程心跳（供 status 判断存活）
 <知识库目录>/.knowbase-pause          # pause 的实现：存在即跳过同步周期
+~/.claude/CLAUDE.md                   # init 写入 knowbase 托管区块（uninstall 移除）
+~/.codex/AGENTS.md                    # 同上
 ```
 
 `.knowbase-pause` 已由 init 种入仓库 `.gitignore`，不参与同步。

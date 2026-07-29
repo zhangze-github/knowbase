@@ -11,12 +11,14 @@ import {
 } from "../config.js";
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
+import { installAgentConfig } from "../agent-config.js";
 
 export interface InitOptions {
   dir?: string;
   branch?: string;
   interval?: string;
-  writeClaudeMd?: boolean;
+  /** commander 的 --no-agent-config 会把该值设为 false（默认 true）。 */
+  agentConfig?: boolean;
 }
 
 function printSshGuidance(url: string): void {
@@ -46,18 +48,6 @@ function ensureLine(filePath: string, line: string): boolean {
   const prefix = content.length > 0 && !content.endsWith("\n") ? "\n" : "";
   fs.appendFileSync(filePath, prefix + line + "\n");
   return true;
-}
-
-function integrationSnippet(dir: string): string {
-  return `## 组织知识库（knowbase）
-
-本机知识库位于：\`${dir}\`
-它是一个由 knowbase 后台自动与 Git 远端双向同步的普通文件夹。
-
-- 需要组织的业务背景、历史决策、环境配置等隐性知识时，直接 grep / 读取该目录下的 Markdown。
-- 产生了值得沉淀的新知识时，直接在该目录写入/编辑 Markdown 即可，保存即同步，无需 commit/push。
-- 进行大范围改动前先运行 \`knowbase pause\`，完成后 \`knowbase resume\`，避免半成品被自动提交。
-`;
 }
 
 export function cmdInit(url: string, opts: InitOptions): number {
@@ -160,23 +150,30 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.warn("  可稍后重跑 init，或手动运行 `knowbase daemon`。");
   }
 
-  // 6. 集成片段
-  const snippet = integrationSnippet(dir);
-  if (opts.writeClaudeMd) {
-    for (const name of ["CLAUDE.md", "AGENTS.md"]) {
-      const f = path.join(dir, name);
-      fs.appendFileSync(f, (fs.existsSync(f) ? "\n" : "") + snippet);
-    }
-    console.log("• 已把集成片段追加到知识库目录的 CLAUDE.md / AGENTS.md");
+  // 6. 自动配置 AI agent 全局提示词（默认开启，--no-agent-config 可跳过）
+  if (opts.agentConfig === false) {
+    console.log("• 已跳过 AI agent 全局提示词配置（--no-agent-config）");
   } else {
-    console.log("\n把下面这段粘贴到你的 CLAUDE.md / AGENTS.md：\n");
-    console.log("————————————————————————————————");
-    console.log(snippet);
-    console.log("————————————————————————————————");
-    console.log("（或重跑 init 时加 --write-claude-md 直接写入知识库目录）");
+    try {
+      const changes = installAgentConfig(dir);
+      for (const c of changes) {
+        const verb =
+          c.action === "created"
+            ? "已创建并写入"
+            : c.action === "updated"
+              ? "已更新"
+              : "已是最新";
+        console.log(`• ${c.name} 全局提示词${verb}：${c.file}`);
+      }
+    } catch (e) {
+      console.warn(
+        `⚠ 配置 AI agent 全局提示词时出错：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
   }
 
-  console.log("\n✓ 接入完成。运行 `knowbase status` 查看健康度。");
+  console.log("\n✓ 接入完成。你的 Claude Code / Codex 已知道知识库位置。");
+  console.log("  运行 `knowbase status` 查看健康度。");
   logger.log(`init 完成：dir=${dir} url=${url} branch=${branch}`);
   return 0;
 }

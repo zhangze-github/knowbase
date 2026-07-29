@@ -81,6 +81,34 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.readFileSync(path.join(kb, ".gitignore"), "utf8")).toContain(
       ".knowbase-pause"
     );
+
+    // 默认自动配置 Claude Code / Codex 全局提示词
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    const codex = path.join(home, ".codex", "AGENTS.md");
+    expect(fs.readFileSync(claude, "utf8")).toContain(kb);
+    expect(fs.readFileSync(codex, "utf8")).toContain(kb);
+    expect(r.out).toContain("全局提示词");
+  });
+
+  it("init 保留 Claude 已有全局偏好，仅追加托管区块", () => {
+    const kb = path.join(root, "kb");
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(claude), { recursive: true });
+    fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const content = fs.readFileSync(claude, "utf8");
+    expect(content).toContain("始终用中文回答");
+    expect(content).toContain("KNOWBASE:START");
+  });
+
+  it("--no-agent-config 跳过全局提示词写入", () => {
+    const kb = path.join(root, "kb");
+    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("跳过");
+    expect(fs.existsSync(path.join(home, ".claude", "CLAUDE.md"))).toBe(false);
+    expect(fs.existsSync(path.join(home, ".codex", "AGENTS.md"))).toBe(false);
   });
 
   it("init → 写文件 → sync 推送 → 另一 clone 可见", () => {
@@ -135,14 +163,24 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(st.code).not.toBe(0);
   });
 
-  it("uninstall 保留本地文件夹", () => {
+  it("uninstall 保留本地文件夹并移除全局提示词区块", () => {
     const kb = path.join(root, "kb");
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(claude), { recursive: true });
+    fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
+
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(fs.readFileSync(claude, "utf8")).toContain("KNOWBASE:START");
+
     const u = knowbase(["uninstall"]);
     expect(u.code).toBe(0);
     expect(u.out).toContain("保留");
     // 知识库目录仍在
     expect(fs.existsSync(kb)).toBe(true);
+    // 全局提示词区块已移除，但原有偏好保留
+    const after = fs.readFileSync(claude, "utf8");
+    expect(after).toContain("始终用中文回答");
+    expect(after).not.toContain("KNOWBASE:START");
   });
 
   it("未接入时 status 给出引导", () => {

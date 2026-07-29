@@ -1,6 +1,6 @@
 {
   "name": "knowbase",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "AI 时代的团队知识库同步工具：安装即忘，本地文件夹 ⇋ Git 远端后台自动双向同步，冲突全自动处理。",
   "keywords": [
     "knowledge-base",

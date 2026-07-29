@@ -38,8 +38,8 @@ program
   .option("--dir <path>", "本地知识库目录（默认 ~/org-kb）")
   .option("--branch <branch>", "同步分支（默认 main）")
   .option("--interval <seconds>", "同步间隔秒数（默认 60）")
-  .option("--write-claude-md", "把集成片段直接写入知识库目录的 CLAUDE.md / AGENTS.md")
-  .description("一次性接入：环境检查 → clone → 种入规则 → 注册自启 → 输出集成片段")
+  .option("--no-agent-config", "跳过写入 Claude Code / Codex 全局提示词")
+  .description("一次性接入：环境检查 → clone → 种入规则 → 注册自启 → 配置 AI agent 全局提示词")
   .action((url: string, opts: InitOptions) => run(() => cmdInit(url, opts)));
 
 program
