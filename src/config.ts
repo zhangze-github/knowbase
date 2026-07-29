@@ -44,6 +44,15 @@ export function logPath(): string {
   return path.join(configDir(), "knowbase.log");
 }
 
+/**
+ * launchd/systemd 重定向守护进程 stdout/stderr 的独立文件。
+ * 不能与 logPath() 共用：Logger 用 rename 轮转，服务管理器持有的旧 fd
+ * 会继续写入改名后的文件，崩溃堆栈这类关键输出会落错地方。
+ */
+export function daemonStdoutPath(): string {
+  return path.join(configDir(), "daemon.stdout.log");
+}
+
 export function daemonStatePath(): string {
   return path.join(configDir(), "daemon.state.json");
 }
@@ -56,6 +65,8 @@ export interface DaemonState {
   lastCycleAt?: string;
   /** 最近一次「有效同步」（提交/合并/推送成功且无错误）时间。 */
   lastSyncOkAt?: string;
+  /** 最近一次无异常周期（含「检查过且已一致」）时间——比 lastSyncOkAt 更能反映健康度。 */
+  lastOkCycleAt?: string;
   /** 最近一次周期的错误说明（网络失败等）。 */
   lastError?: string;
   paused?: boolean;

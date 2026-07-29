@@ -1,7 +1,10 @@
+import fs from "node:fs";
 import {
   configExists,
+  configPath,
   loadConfig,
   clearDaemonState,
+  daemonStdoutPath,
   Logger,
 } from "../config.js";
 import { getAutostart } from "../platform/index.js";
@@ -39,7 +42,15 @@ export function cmdUninstall(): number {
 
   new Logger().log("uninstall：已注销自启并停止守护进程");
 
-  console.log("• 已清理守护进程状态");
+  // 移除配置与守护进程 stdout（保留 knowbase.log 供事后排查）
+  try {
+    fs.rmSync(configPath(), { force: true });
+    fs.rmSync(daemonStdoutPath(), { force: true });
+  } catch {
+    // ignore
+  }
+
+  console.log("• 已清理守护进程状态与配置（日志保留以便排查）");
   if (dir) {
     console.log("");
     console.log(`✓ 已卸载。本地知识库文件夹已保留，不会删除：`);

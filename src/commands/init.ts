@@ -76,7 +76,14 @@ export function cmdInit(url: string, opts: InitOptions): number {
 
   const dir = path.resolve(opts.dir ?? defaultDir());
   const branch = opts.branch ?? DEFAULT_BRANCH;
-  const interval = opts.interval ? parseInt(opts.interval, 10) : DEFAULT_INTERVAL;
+  let interval = DEFAULT_INTERVAL;
+  if (opts.interval !== undefined) {
+    interval = parseInt(opts.interval, 10);
+    if (!Number.isInteger(interval) || interval < 5) {
+      console.error(`✗ --interval 必须是 ≥ 5 的整数秒，收到：${opts.interval}`);
+      return 1;
+    }
+  }
 
   // 2. clone（或复用已存在的同仓库目录）
   if (fs.existsSync(dir)) {
@@ -103,11 +110,21 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("  ✓ clone 完成");
   }
 
-  // 切到目标分支（若与当前不同且远端存在该分支）
-  if (git.currentBranch(dir) !== branch) {
+  // git 身份提示（缺失时同步引擎会用临时身份兜底，不阻塞）
+  if (!git.hasIdentity(dir)) {
+    console.warn("⚠ 未配置 git user.name/email，自动提交将使用临时身份 knowbase[主机名]。");
+    console.warn('  建议配置：git config --global user.name "你的名字" && git config --global user.email "you@example.com"');
+  }
+
+  // 切到目标分支。空仓库（HEAD 未诞生）跳过——首次推送时由 HEAD:<branch> 建立；
+  // 非空仓库切换失败则硬失败：沿用错误分支会把其他分支内容推成 <branch>，语义混乱。
+  const headBorn = git.ok(git.git(["rev-parse", "--verify", "--quiet", "HEAD"], { cwd: dir }));
+  if (headBorn && git.currentBranch(dir) !== branch) {
     const co = git.git(["checkout", branch], { cwd: dir });
     if (!git.ok(co)) {
-      console.warn(`⚠ 无法切换到分支 ${branch}，沿用当前分支 ${git.currentBranch(dir)}`);
+      console.error(`✗ 无法切换到分支 ${branch}：${co.stderr.trim()}`);
+      console.error(`  远端若使用其他分支名，请用 --branch 指定（当前本地分支：${git.currentBranch(dir)}）。`);
+      return 1;
     }
   }
 

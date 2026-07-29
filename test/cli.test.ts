@@ -183,6 +183,27 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(after).not.toContain("KNOWBASE:START");
   });
 
+  it("--interval 非法值直接报错", () => {
+    const kb = path.join(root, "kb");
+    const bad = knowbase(["init", bare, "--dir", kb, "--interval", "abc"]);
+    expect(bad.code).not.toBe(0);
+    expect(bad.out).toContain("--interval");
+
+    const tooSmall = knowbase(["init", bare, "--dir", kb, "--interval", "2"]);
+    expect(tooSmall.code).not.toBe(0);
+  });
+
+  it("uninstall 后 config 被移除，status 回到未接入引导", () => {
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(knowbase(["uninstall"]).code).toBe(0);
+    const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+    expect(fs.existsSync(cfgPath)).toBe(false);
+    const st = knowbase(["status"]);
+    expect(st.code).toBe(0);
+    expect(st.out).toContain("尚未接入");
+  });
+
   it("未接入时 status 给出引导", () => {
     const st = knowbase(["status"]);
     expect(st.code).toBe(0);

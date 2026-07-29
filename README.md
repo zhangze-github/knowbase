@@ -33,7 +33,7 @@ knowbase status
 | `knowbase sync` | 立即触发一次同步周期（前台输出，用于排查和急用） |
 | `knowbase pause` | 暂停自动同步（大范围改动期间用，避免半成品被提交） |
 | `knowbase resume` | 恢复自动同步 |
-| `knowbase uninstall` | 干净移除：注销自启、停止守护进程，**保留本地文件夹** |
+| `knowbase uninstall` | 干净移除：注销自启、停止守护进程、删除配置与 agent 提示词区块，**保留本地文件夹**（及日志备查） |
 
 ## 同步与冲突策略
 
@@ -59,9 +59,11 @@ knowbase status
 <!-- KNOWBASE:START （由 knowbase 自动管理，勿手动编辑本区块） -->
 ## 组织知识库（knowbase）
 本机知识库位于：`~/org-kb`
-...（读写 / 暂停约定）...
+...（读写准则 / 暂停约定）...
 <!-- KNOWBASE:END -->
 ```
+
+区块中的写入准则明确划分了**组织知识 vs 个人内容**的边界：只沉淀对团队其他成员有复用价值的组织级知识（业务规则、技术决策、公共配置、通用踩坑）；个人偏好、个人待办、私人信息**禁止**写入共享知识库，拿不准时 agent 会先询问用户。
 
 - **幂等**：重复 `init` 只会原地更新该区块，不会重复堆叠。
 - **不侵入**：只在文件末尾追加/更新自己的区块，你在同一文件里的其他内容原样保留。
@@ -84,6 +86,7 @@ knowbase status
 ~/.config/knowbase/config.json        # 仓库地址、本地目录、同步间隔、分支
 ~/.config/knowbase/knowbase.log       # 滚动日志（status 报错时引导看这里）
 ~/.config/knowbase/daemon.state.json  # 守护进程心跳（供 status 判断存活）
+~/.config/knowbase/daemon.stdout.log  # 服务管理器重定向的守护进程 stdout/stderr
 <知识库目录>/.knowbase-pause          # pause 的实现：存在即跳过同步周期
 ~/.claude/CLAUDE.md                   # init 写入 knowbase 托管区块（uninstall 移除）
 ~/.codex/AGENTS.md                    # 同上

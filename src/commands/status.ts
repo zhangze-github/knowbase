@@ -77,10 +77,25 @@ export function cmdStatus(): number {
     );
   }
   console.log(`开机自启：  ${installed ? "已注册" : "未注册"}`);
-  console.log(`上次成功同步：${fmtTime(state?.lastSyncOkAt)}`);
-  console.log(`上次同步周期：${fmtTime(state?.lastCycleAt)}`);
+  console.log(`上次正常检查：${fmtTime(state?.lastOkCycleAt)}（含「已一致，无需同步」）`);
+  console.log(`上次内容同步：${fmtTime(state?.lastSyncOkAt)}`);
   if (state?.lastError) {
     console.log(`最近一次错误：${state.lastError}`);
+  }
+
+  // 残留锁检测（正常时锁会被守护进程 10 分钟阈值自愈；这里提前给出可见提示）
+  const lockFile = path.join(cfg.dir, ".git", "index.lock");
+  if (fs.existsSync(lockFile)) {
+    try {
+      const ageMin = Math.floor((Date.now() - fs.statSync(lockFile).mtimeMs) / 60000);
+      if (ageMin >= 10) {
+        anomalies.push(
+          `存在残留的 .git/index.lock（${ageMin} 分钟前）——守护进程会自动清除；也可手动删除 ${lockFile}`
+        );
+      }
+    } catch {
+      // ignore
+    }
   }
 
   // 暂停状态（醒目）

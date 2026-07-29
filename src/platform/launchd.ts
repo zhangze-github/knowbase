@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { logPath } from "../config.js";
+import { daemonStdoutPath } from "../config.js";
 import { Autostart, selfInvocation } from "./index.js";
 
 const LABEL = "com.knowbase.daemon";
@@ -36,11 +36,23 @@ export class LaunchdAutostart implements Autostart {
 
   private buildPlist(): string {
     const { node, script } = selfInvocation();
-    const log = logPath();
+    // 与 Logger 的轮转日志分开：Logger rename 后 launchd 的旧 fd 会写错文件
+    const stdout = daemonStdoutPath();
     const args = [node, script, "daemon"];
     const progArgs = args
       .map((a) => `    <string>${xmlEscape(a)}</string>`)
       .join("\n");
+    // launchd 不继承 shell 环境；用户自定义 XDG_CONFIG_HOME 时需固化进服务定义，
+    // 否则守护进程按默认 ~/.config 找不到配置。
+    const xdg = process.env.XDG_CONFIG_HOME?.trim();
+    const envBlock = xdg
+      ? `  <key>EnvironmentVariables</key>
+  <dict>
+    <key>XDG_CONFIG_HOME</key>
+    <string>${xmlEscape(xdg)}</string>
+  </dict>
+`
+      : "";
     return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51,14 +63,14 @@ export class LaunchdAutostart implements Autostart {
   <array>
 ${progArgs}
   </array>
-  <key>RunAtLoad</key>
+${envBlock}  <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>${xmlEscape(log)}</string>
+  <string>${xmlEscape(stdout)}</string>
   <key>StandardErrorPath</key>
-  <string>${xmlEscape(log)}</string>
+  <string>${xmlEscape(stdout)}</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>

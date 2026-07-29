@@ -1,4 +1,5 @@
 import { spawnSync, SpawnSyncOptions } from "node:child_process";
+import { safeHostname } from "./config.js";
 
 export interface GitResult {
   code: number;
@@ -118,13 +119,36 @@ export function addAll(dir: string): GitResult {
   return git(["add", "-A"], { cwd: dir });
 }
 
+/** 该仓库视角下 git 身份（user.name + user.email）是否已配置。 */
+export function hasIdentity(dir: string): boolean {
+  const name = git(["config", "user.name"], { cwd: dir });
+  const email = git(["config", "user.email"], { cwd: dir });
+  return (
+    name.code === 0 &&
+    name.stdout.trim() !== "" &&
+    email.code === 0 &&
+    email.stdout.trim() !== ""
+  );
+}
+
+/**
+ * 身份兜底：目标用户可能从未配置过 git user.name/email，此时 commit/merge
+ * 会永久失败（产品要求「安装即忘」）。仅在身份缺失时注入 -c 临时身份，
+ * 已配置的机器不受影响。
+ */
+function identityArgs(dir: string): string[] {
+  if (hasIdentity(dir)) return [];
+  const host = safeHostname();
+  return ["-c", `user.name=knowbase[${host}]`, "-c", `user.email=knowbase@${host}`];
+}
+
 export function commit(dir: string, message: string): GitResult {
-  return git(["commit", "-m", message], { cwd: dir });
+  return git([...identityArgs(dir), "commit", "-m", message], { cwd: dir });
 }
 
 /** 完成一次 merge 提交（沿用 git 准备好的 MERGE_MSG）。 */
 export function commitNoEdit(dir: string): GitResult {
-  return git(["commit", "--no-edit"], { cwd: dir });
+  return git([...identityArgs(dir), "commit", "--no-edit"], { cwd: dir });
 }
 
 export function fetch(dir: string, remote: string, timeoutMs = 60000): GitResult {
@@ -157,7 +181,8 @@ export function upstreamExists(dir: string, upstream: string): boolean {
 
 /** merge 指定 ref；返回结果（冲突时 code!=0，由调用方处理冲突副本）。 */
 export function merge(dir: string, ref: string): GitResult {
-  return git(["merge", "--no-edit", ref], { cwd: dir });
+  // merge 也会产生提交，同样需要身份兜底
+  return git([...identityArgs(dir), "merge", "--no-edit", ref], { cwd: dir });
 }
 
 /** 处于冲突（未合并）状态的文件列表。 */

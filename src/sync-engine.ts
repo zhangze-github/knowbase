@@ -7,6 +7,8 @@ import {
   safeHostname,
   timestamp,
   writeDaemonState,
+  readDaemonState,
+  pidAlive,
   DaemonState,
 } from "./config.js";
 import * as git from "./git.js";
@@ -106,6 +108,26 @@ function handleConflicts(dir: string, deps: SyncDeps): string[] {
   return copies;
 }
 
+/** stale 判定阈值：正常 git 操作绝不会持锁这么久。 */
+const STALE_LOCK_MS = 10 * 60 * 1000;
+
+/**
+ * 自愈：进程在 add/commit 中途被杀（关机、kill -9）会残留 .git/index.lock，
+ * 之后每一轮 git 操作都失败且永不恢复。锁文件足够老时视为残留，直接清除。
+ */
+function clearStaleLock(dir: string, logger: Logger): void {
+  const lock = path.join(dir, ".git", "index.lock");
+  try {
+    const st = fs.statSync(lock);
+    if (Date.now() - st.mtimeMs > STALE_LOCK_MS) {
+      fs.rmSync(lock, { force: true });
+      logger.log("检测到残留的 .git/index.lock（超过 10 分钟），已自动清除");
+    }
+  } catch {
+    // 锁不存在（正常情况）
+  }
+}
+
 /**
  * 执行一次完整同步周期（product.md §2.2）。永不抛异常：
  * 网络失败记录到 result.error，交由下一周期重试。
@@ -124,6 +146,9 @@ export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
   }
 
   try {
+    // 1.5 自愈残留锁
+    clearStaleLock(dir, logger);
+
     // 2. 本地有改动 → add -A → commit（先提交，保证 merge 面对干净工作区）
     if (git.hasChanges(dir)) {
       const files = git.changedFiles(dir);
@@ -202,8 +227,24 @@ function sleep(ms: number): Promise<void> {
  * 守护进程主体：固定周期跑同步循环，任何异常都不退出。
  * 由服务管理器拉起（launchd/systemd/schtasks）。
  */
+/** 是否已有另一个守护进程实例在运行（单实例保护）。 */
+export function anotherDaemonRunning(selfPid: number): boolean {
+  const existing = readDaemonState();
+  return !!existing && existing.pid !== selfPid && pidAlive(existing.pid);
+}
+
 export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const { logger } = deps;
+
+  // 单实例保护：手动 `knowbase daemon` 与服务管理器拉起的实例并存时，
+  // 双方会互踩状态文件、无谓竞争 git 锁。后来者直接退出。
+  if (anotherDaemonRunning(process.pid)) {
+    const msg = `已有守护进程在运行（pid ${readDaemonState()?.pid}），本实例退出`;
+    logger.log(msg);
+    console.error(msg);
+    return;
+  }
+
   const startedAt = new Date().toISOString();
   const state: DaemonState = { pid: process.pid, startedAt };
   writeDaemonState(state);
@@ -217,8 +258,11 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
       state.lastCycleAt = new Date().toISOString();
       state.paused = r.paused;
       state.lastError = r.error;
-      if (!r.error && !r.paused && (r.committed || r.merged || r.pushed)) {
-        state.lastSyncOkAt = state.lastCycleAt;
+      if (!r.error && !r.paused) {
+        state.lastOkCycleAt = state.lastCycleAt;
+        if (r.committed || r.merged || r.pushed) {
+          state.lastSyncOkAt = state.lastCycleAt;
+        }
       }
       writeDaemonState(state);
     } catch (e) {

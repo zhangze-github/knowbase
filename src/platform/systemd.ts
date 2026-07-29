@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { logPath } from "../config.js";
+import { daemonStdoutPath } from "../config.js";
 import { Autostart, selfInvocation } from "./index.js";
 
 const UNIT = "knowbase.service";
@@ -33,6 +33,9 @@ export class SystemdAutostart implements Autostart {
 
   private buildUnit(): string {
     const { node, script } = selfInvocation();
+    // systemd user service 不继承 shell 环境；固化自定义 XDG_CONFIG_HOME
+    const xdg = process.env.XDG_CONFIG_HOME?.trim();
+    const envLine = xdg ? `Environment=XDG_CONFIG_HOME=${xdg}\n` : "";
     return `[Unit]
 Description=knowbase 知识库后台同步守护进程
 After=network-online.target
@@ -43,8 +46,8 @@ Type=simple
 ExecStart=${node} ${script} daemon
 Restart=always
 RestartSec=10
-StandardOutput=append:${logPath()}
-StandardError=append:${logPath()}
+${envLine}StandardOutput=append:${daemonStdoutPath()}
+StandardError=append:${daemonStdoutPath()}
 
 [Install]
 WantedBy=default.target
