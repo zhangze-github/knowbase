@@ -1,0 +1,48 @@
+{
+  "name": "knowbase",
+  "version": "0.1.0",
+  "description": "AI 时代的团队知识库同步工具：安装即忘，本地文件夹 ⇋ Git 远端后台自动双向同步，冲突全自动处理。",
+  "keywords": [
+    "knowledge-base",
+    "git",
+    "sync",
+    "ai",
+    "claude-code",
+    "markdown",
+    "daemon"
+  ],
+  "license": "MIT",
+  "author": "zhangze",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhangze-github/lorebase.git"
+  },
+  "type": "module",
+  "bin": {
+    "knowbase": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run build",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "update-notifier": "^7.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/update-notifier": "^6.0.8",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
