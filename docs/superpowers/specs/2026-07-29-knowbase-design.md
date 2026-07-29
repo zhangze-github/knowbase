@@ -69,6 +69,18 @@ syncOnce():
 - **真实 GitLab 实测**：对 `gitlab.deeplink.media/nodejs/knowledge-base` 真实 init + 双向 sync（用明确标记的测试文件，测后清理）
 - **macOS launchd**：真实注册→确认进程被拉起→注销
 
-## 7. 非目标（照搬 product.md §5.3）
+## 7. v0.2.0：watch+防抖混合调度（用户提议，2026-07-29）
+
+原版为固定 interval 轮询。0.2.0 改为混合：
+- **上行**：`fs.watch` 递归监听（`src/watcher.ts`）+ 防抖（静默 3s 触发、30s 封顶防饿死），
+  改动秒级推送，缩小并发编辑冲突窗口。过滤 `.git/` 与 `.knowbase-pause` 事件。
+- **下行**：保留 interval 轮询 fetch（Git 无推送通知）兼作监听失效兜底。
+- **不设同步后屏蔽窗**（第一版实现有，被 e2e 证伪后移除）：屏蔽会丢掉紧跟同步之后的
+  用户编辑；同步自身写盘最多引发一次空跑同步，空跑只动 `.git`（已过滤），天然收敛。
+- Linux 递归监听需 Node ≥ 20，不支持时 `startWatcher` 返回 null 自动退化纯轮询；
+  配置 `watch:false` 可手动关闭。
+- 测试要点：macOS FSEvents 会回放 watch 启动前的历史事件，断言前需静置清空。
+
+## 8. 非目标（照搬 product.md §5.3）
 
 自动更新、检索/模板/lint、PR/审批、内容治理、GUI/托盘、非 Git 后端——均不做。

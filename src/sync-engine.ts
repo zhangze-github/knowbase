@@ -12,6 +12,7 @@ import {
   DaemonState,
 } from "./config.js";
 import * as git from "./git.js";
+import { createDebouncer, startWatcher } from "./watcher.js";
 
 export interface SyncDeps {
   logger: Logger;
@@ -233,6 +234,18 @@ export function anotherDaemonRunning(selfPid: number): boolean {
   return !!existing && existing.pid !== selfPid && pidAlive(existing.pid);
 }
 
+function envInt(name: string, fallback: number): number {
+  const v = parseInt(process.env[name] ?? "", 10);
+  return Number.isInteger(v) && v > 0 ? v : fallback;
+}
+
+/**
+ * 守护进程主体：混合调度。
+ * - 上行加速：文件监听 + 防抖（静默 quietMs 触发，maxWaitMs 封顶防饿死），
+ *   本地一有改动几秒内即推送，缩小多设备并发编辑的冲突窗口。
+ * - 下行兜底：固定 interval 轮询 fetch 远端改动（Git 无推送通知，轮询不可省），
+ *   同时兜住监听失效的情况——最坏退化为纯轮询，不会更糟。
+ */
 export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const { logger } = deps;
 
@@ -248,11 +261,12 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const startedAt = new Date().toISOString();
   const state: DaemonState = { pid: process.pid, startedAt };
   writeDaemonState(state);
-  logger.log(
-    `daemon 启动（pid ${process.pid}）：dir=${cfg.dir} branch=${cfg.branch} interval=${cfg.interval}s`
-  );
-  // eslint-disable-next-line no-constant-condition
-  while (true) {
+
+  // syncOnce 是同步阻塞的，事件循环保证不会重入。
+  // 不设「同步后屏蔽窗」：屏蔽会丢掉紧跟同步之后的用户编辑（只能干等下轮轮询）。
+  // 同步自身写盘（merge 落盘/冲突副本）最多引发一次空跑同步——空跑无改动、
+  // 只动 .git（已过滤），不会形成风暴，天然收敛。
+  const runCycle = (): void => {
     try {
       const r = syncOnce(cfg, deps);
       state.lastCycleAt = new Date().toISOString();
@@ -271,6 +285,42 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
       writeDaemonState(state);
       logger.log(`守护循环异常（已捕获）：${state.lastError}`);
     }
+  };
+
+  // 上行监听（可通过配置 watch:false 关闭；不支持递归监听的平台自动退化）
+  let watching = false;
+  if (cfg.watch !== false) {
+    const quietMs = envInt("KNOWBASE_QUIET_MS", 3000);
+    const maxWaitMs = envInt("KNOWBASE_MAXWAIT_MS", 30000);
+    const debouncer = createDebouncer({
+      quietMs,
+      maxWaitMs,
+      onFire: () => {
+        debouncer.cancel();
+        runCycle();
+      },
+    });
+    const watcher = startWatcher(
+      cfg.dir,
+      () => debouncer.touch(),
+      (e) => {
+        logger.log(`文件监听中断（${e.message}），退化为纯轮询`);
+      }
+    );
+    watching = watcher !== null;
+    if (!watching) {
+      logger.log("当前平台不支持递归文件监听，使用纯轮询");
+    }
+  }
+
+  logger.log(
+    `daemon 启动（pid ${process.pid}）：dir=${cfg.dir} branch=${cfg.branch} ` +
+      `interval=${cfg.interval}s watch=${watching ? "on" : "off"}`
+  );
+
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    runCycle();
     await sleep(Math.max(1, cfg.interval) * 1000);
   }
 }

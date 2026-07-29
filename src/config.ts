@@ -21,10 +21,12 @@ export interface Config {
   repoUrl: string;
   /** 本地知识库目录（绝对路径）。 */
   dir: string;
-  /** 同步间隔，单位秒。 */
+  /** 下行轮询间隔，单位秒（上行由文件监听+防抖触发）。 */
   interval: number;
   /** 同步分支。 */
   branch: string;
+  /** 是否启用文件监听上行加速（默认 true；手动改配置可关）。 */
+  watch?: boolean;
 }
 
 /** 配置目录：$XDG_CONFIG_HOME/knowbase 或 ~/.config/knowbase 。 */
@@ -137,6 +139,7 @@ export function loadConfig(): Config {
     dir: parsed.dir,
     interval: parsed.interval ?? DEFAULT_INTERVAL,
     branch: parsed.branch ?? DEFAULT_BRANCH,
+    watch: parsed.watch !== false,
   };
 }
 
