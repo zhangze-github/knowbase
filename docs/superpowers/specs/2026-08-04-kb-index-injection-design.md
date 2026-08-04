@@ -46,21 +46,29 @@
 <!-- KNOWBASE:END -->
 ```
 
-### 4.1 索引缺失
+### 4.1 文件名大小写不敏感
 
-`<dir>/index.md` 不存在时不输出 `###` 索引段，代之一行：
+索引文件按**大小写不敏感**方式查找：列出 `<dir>` 的条目，取文件名小写后等于 `index.md` 的那一个，因此 `index.md` / `Index.md` / `INDEX.md` 均被识别。
+
+理由：macOS 的 APFS 默认大小写不敏感，Linux 大小写敏感。若按字面 `index.md` 查找，仓库里存在 `Index.md` 时会出现「macOS 上索引生效、Linux 上索引缺失」的跨平台不一致——同一个知识库在不同成员机器上行为不同，极难排查。
+
+存在多个大小写变体时（只可能发生在大小写敏感的文件系统上）取值必须确定：优先精确匹配 `index.md`，否则取排序后的第一个。同时在日志中记录一次告警，提示仓库内存在重名变体。
+
+### 4.2 索引缺失
+
+未找到索引文件时不输出 `###` 索引段，代之一行：
 
 > 根目录暂无 `index.md`，需要时直接 grep 全库。
 
 理由：索引维护 agent 尚未跑起来时 `init` 不应报错，也不该留下空标题。
 
-### 4.2 标记注入防护（必须）
+### 4.3 标记注入防护（必须）
 
 索引全文由外部 agent 生成，内容可能包含 `KNOWBASE:START` / `KNOWBASE:END` 字样（例如索引里记录了 knowbase 自身的文档）。若原样内嵌，`upsertBlock` / `stripBlock` 会匹配到提前出现的结束标记、切错位置，吞掉用户 `CLAUDE.md` 中区块之后的内容。
 
 内嵌前把索引正文中的 `KNOWBASE:START` / `KNOWBASE:END` 字样中和（替换为 `KNOWBASE_START` / `KNOWBASE_END`）。
 
-### 4.3 体积上限
+### 4.4 体积上限
 
 索引全文超过 **8192 字节**（约 2k token）时，在不超限的最后一个换行处截断，追加：
 
@@ -68,7 +76,7 @@
 
 理由：索引长起来会静默吃掉每次会话的上下文预算，必须有硬上限。
 
-### 4.4 标题层级不降级
+### 4.5 标题层级不降级
 
 索引中的 `#` / `##` 原样内嵌，不改写为 `###`。正确降级需要区分代码块内外的 `#`，复杂度不划算；提示词中的层级错乱不影响 agent 理解。
 
@@ -79,7 +87,7 @@
 `installAgentConfig` 改名为 `syncAgentConfig(dir, home?)`，职责：
 
 ```
-读 <dir>/index.md → 中和标记 → 超限截断
+定位索引文件（大小写不敏感）→ 读取 → 中和标记 → 超限截断
   → buildBlock(dir, index)
   → 对每个 target: upsertBlock；内容与现状相同则不落盘
   → 返回 AgentConfigChange[]
@@ -116,7 +124,7 @@
 
 | 文件 | 改动 |
 |---|---|
-| `src/agent-config.ts` | 新增 `readIndex()`（读取 + 标记中和 + 截断）；`buildBlock(dir, index)`；`installAgentConfig` → `syncAgentConfig`；写入改原子 |
+| `src/agent-config.ts` | 新增 `findIndexFile()`（大小写不敏感定位）与 `readIndex()`（读取 + 标记中和 + 截断）；`buildBlock(dir, index)`；`installAgentConfig` → `syncAgentConfig`；写入改原子 |
 | `src/config.ts` | `Config.agentConfig?: boolean`，`loadConfig` 默认 `true` |
 | `src/commands/init.ts` | 持久化 `agentConfig` 字段；调用改名后的函数 |
 | `src/sync-engine.ts` | `runCycle` 末尾按开关调 `syncAgentConfig`，try/catch，变更时记日志 |
@@ -130,15 +138,17 @@
 
 1. 索引存在 → 区块含全文与 `###` 索引标题
 2. 索引缺失 → 区块含回退文案、无索引标题、不抛错
-3. 索引超 8KB → 被截断、含截断提示、截断点落在行边界
-4. 索引正文含 `KNOWBASE:END` → 被中和；`install → strip` 往返后用户原有内容完整保留
-5. 内容未变 → `action === "unchanged"` 且文件 mtime 不变（未落盘）
-6. `install → 改索引 → sync → uninstall` 往返，用户在同一文件中的其他内容原样保留
+3. 文件名为 `Index.md` / `INDEX.md` 时同样被识别
+4. `index.md` 与 `Index.md` 并存时取 `index.md`。并存状态在大小写不敏感的文件系统上无法构造，因此 `findIndexFile` 的选取逻辑要写成接受「条目名数组」的纯函数，本用例直接测该纯函数，不落盘
+5. 索引超 8KB → 被截断、含截断提示、截断点落在行边界
+6. 索引正文含 `KNOWBASE:END` → 被中和；`install → strip` 往返后用户原有内容完整保留
+7. 内容未变 → `action === "unchanged"` 且文件 mtime 不变（未落盘）
+8. `install → 改索引 → sync → uninstall` 往返，用户在同一文件中的其他内容原样保留
 
 `test/sync-engine.test.ts`：
 
-7. `agentConfig: false` → 一个周期后提示词文件未被写入
-8. `syncAgentConfig` 抛错 → `syncOnce` 结果与 `DaemonState` 不受影响，daemon 继续运行
+9. `agentConfig: false` → 一个周期后提示词文件未被写入
+10. `syncAgentConfig` 抛错 → `syncOnce` 结果与 `DaemonState` 不受影响，daemon 继续运行
 
 ## 8. 可观测性
 
