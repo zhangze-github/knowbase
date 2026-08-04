@@ -7,7 +7,7 @@ import {
   buildBlock,
   upsertBlock,
   stripBlock,
-  installAgentConfig,
+  syncAgentConfig,
   uninstallAgentConfig,
   agentTargets,
   pickIndexName,
@@ -66,14 +66,14 @@ describe("托管区块 upsert / strip", () => {
   });
 });
 
-describe("installAgentConfig / uninstallAgentConfig", () => {
+describe("syncAgentConfig / uninstallAgentConfig", () => {
   it("为 Claude Code 与 Codex 创建/更新，且保留已有内容；uninstall 清除", () => {
     // 预置一个已有的 Claude 全局偏好文件
     const claude = path.join(home, ".claude", "CLAUDE.md");
     fs.mkdirSync(path.dirname(claude), { recursive: true });
     fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
 
-    const changes = installAgentConfig("/Users/x/knowledge-base", home);
+    const changes = syncAgentConfig("/Users/x/knowledge-base", home);
     const byName = Object.fromEntries(changes.map((c) => [c.name, c]));
     expect(byName["Claude Code"].action).toBe("updated");
     expect(byName["Codex"].action).toBe("created");
@@ -89,7 +89,7 @@ describe("installAgentConfig / uninstallAgentConfig", () => {
     expect(fs.readFileSync(codex, "utf8")).toContain("/Users/x/knowledge-base");
 
     // 幂等：再次 install 不重复
-    const again = installAgentConfig("/Users/x/knowledge-base", home);
+    const again = syncAgentConfig("/Users/x/knowledge-base", home);
     expect(again.every((c) => c.action === "unchanged")).toBe(true);
 
     // uninstall：移除区块，保留原偏好
@@ -170,5 +170,96 @@ describe("索引读取", () => {
     const body = r.text!.split("\n\n…")[0];
     expect(body.split("\n").every((l) => l === "x".repeat(99))).toBe(true);
     expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+  });
+
+  it("单行超长且全文无换行 → 退化为按字节截断，不产生替换符", () => {
+    fs.writeFileSync(path.join(kb, "index.md"), "x".repeat(10000)); // 无换行，10000 字节
+    const r = readIndex(kb);
+    expect(r.truncated).toBe(true);
+    const body = r.text!.split("\n\n…")[0];
+    expect(body).not.toContain("�");
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+  });
+
+  it("截断点落在多字节字符中间 → 不产生替换符", () => {
+    // 每个「汉」3 字节，4000 个 = 12000 字节，且全文无换行；
+    // 8192 不是 3 的倍数，截断点必然落在某个字符中间。
+    fs.writeFileSync(path.join(kb, "index.md"), "汉".repeat(4000));
+    const r = readIndex(kb);
+    expect(r.truncated).toBe(true);
+    const body = r.text!.split("\n\n…")[0];
+    expect(body).not.toContain("�");
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+  });
+});
+
+describe("区块内嵌索引", () => {
+  let kb: string;
+  beforeEach(() => {
+    kb = tmpDir("kb");
+  });
+  afterEach(() => {
+    fs.rmSync(kb, { recursive: true, force: true });
+  });
+
+  const claudeFile = () => path.join(home, ".claude", "CLAUDE.md");
+
+  it("有索引 → 含索引标题、正文与导航段", () => {
+    const b = buildBlock("/kb", "# 索引\n- 角色/：角色定义与职责");
+    expect(b).toContain("### 知识库索引");
+    expect(b).toContain("角色定义与职责");
+    expect(b).toContain("**导航**");
+  });
+
+  it("无索引 → 回退文案、无索引标题、仍有导航段", () => {
+    const b = buildBlock("/kb", null);
+    expect(b).not.toContain("### 知识库索引");
+    expect(b).toContain("暂无");
+    expect(b).toContain("**导航**");
+  });
+
+  it("索引含标记字样时 sync→strip 往返不吞用户内容", () => {
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n区块以 KNOWBASE:END 收尾\n");
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.writeFileSync(claudeFile(), "# 偏好\n用中文回答\n");
+
+    syncAgentConfig(kb, home);
+    const { content, removed } = stripBlock(fs.readFileSync(claudeFile(), "utf8"));
+    expect(removed).toBe(true);
+    expect(content).toContain("用中文回答");
+    expect(content).not.toContain("KNOWBASE");
+  });
+
+  it("内容未变 → unchanged 且不落盘", async () => {
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 条目\n");
+    syncAgentConfig(kb, home);
+    const before = fs.statSync(claudeFile()).mtimeMs;
+    await new Promise((r) => setTimeout(r, 20));
+
+    const again = syncAgentConfig(kb, home);
+    expect(again.every((c) => c.action === "unchanged")).toBe(true);
+    expect(fs.statSync(claudeFile()).mtimeMs).toBe(before);
+  });
+
+  it("索引变化 → 区块随之更新，旧内容消失", () => {
+    const idx = path.join(kb, "index.md");
+    fs.writeFileSync(idx, "# 索引\n- 旧条目\n");
+    syncAgentConfig(kb, home);
+
+    fs.writeFileSync(idx, "# 索引\n- 新条目\n");
+    const changes = syncAgentConfig(kb, home);
+    expect(changes.every((c) => c.action === "updated")).toBe(true);
+
+    const content = fs.readFileSync(claudeFile(), "utf8");
+    expect(content).toContain("新条目");
+    expect(content).not.toContain("旧条目");
+  });
+
+  it("写入后不残留临时文件", () => {
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n");
+    syncAgentConfig(kb, home);
+    const left = fs.readdirSync(path.join(home, ".claude"));
+    expect(left.some((f) => f.includes("knowbase-tmp"))).toBe(false);
+    expect(left).toContain("CLAUDE.md");
   });
 });

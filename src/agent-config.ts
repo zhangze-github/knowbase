@@ -66,6 +66,7 @@ function truncateAtLine(text: string, max: number): { text: string; truncated: b
   const head = buf.subarray(0, max).toString("utf8");
   const cut = head.lastIndexOf("\n");
   // 无换行可切（单行超长）时退化为按字符切，并去掉多字节字符被切断产生的替换符
+  // cut > 0 而非 >= 0 是有意为之：换行落在下标 0 会切出空正文，不如落到下面的字节级兜底
   const kept = cut > 0 ? head.slice(0, cut) : head.replace(/�+$/, "");
   return { text: kept, truncated: true };
 }
@@ -113,8 +114,17 @@ export function readIndex(dir: string): IndexResult {
   return { name, text, bytes, truncated: cut.truncated };
 }
 
-/** 生成托管区块正文（含起止标记），内嵌本机知识库目录。 */
-export function buildBlock(dir: string): string {
+/**
+ * 生成托管区块正文（含起止标记），内嵌本机知识库目录与根索引快照。
+ * index 传 null / undefined 时输出回退文案（索引维护 agent 还没跑起来的情况）。
+ */
+export function buildBlock(dir: string, index?: string | null): string {
+  const indexSection = index
+    ? `### 知识库索引（根 ${INDEX_NAME} 快照，由 knowbase 自动同步）
+
+${index}`
+    : `根目录暂无 \`${INDEX_NAME}\`，需要时直接 grep 全库。`;
+
   return `${BLOCK_START}
 ## 组织知识库（knowbase）
 
@@ -129,6 +139,10 @@ export function buildBlock(dir: string): string {
 - 拿不准是否属于组织知识时，先询问用户，不要擅自写入。
 
 **操作**：直接在该目录写入 / 编辑 Markdown 即可，保存即同步，无需 git add/commit/push。大范围改动前先运行 \`knowbase pause\`，完成后 \`knowbase resume\`。
+
+**导航**：知识库每个目录下都有 \`${INDEX_NAME}\` 作为该目录的索引（文件名大小写不敏感）。进入任一子目录查找前，先读该目录的 \`${INDEX_NAME}\`；在知识库中新增或删除文件后，顺手更新所在目录的 \`${INDEX_NAME}\`。
+
+${indexSection}
 ${BLOCK_END}`;
 }
 
@@ -172,12 +186,27 @@ export interface AgentConfigChange {
   action: "created" | "updated" | "unchanged";
 }
 
-/** init 时调用：把托管区块写入所有 agent 全局提示词文件。 */
-export function installAgentConfig(
+/**
+ * 原子写入：同目录临时文件 + rename。
+ * 这些是用户的个人提示词文件，改为每个同步周期都可能触发的周期性写入后，
+ * 进程在错误时机被 kill 会留下截断的 CLAUDE.md，损坏代价高。
+ */
+function writeFileAtomic(file: string, content: string): void {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.knowbase-tmp`;
+  fs.writeFileSync(tmp, content, "utf8");
+  fs.renameSync(tmp, file);
+}
+
+/**
+ * 把托管区块（含知识库根索引快照）写入所有 agent 全局提示词文件。
+ * init 与守护进程每个同步周期共用此函数；内容与现状相同则不落盘。
+ */
+export function syncAgentConfig(
   dir: string,
   home: string = os.homedir()
 ): AgentConfigChange[] {
-  const block = buildBlock(dir);
+  const block = buildBlock(dir, readIndex(dir).text);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);
@@ -187,8 +216,7 @@ export function installAgentConfig(
       changes.push({ name: t.name, file: t.file, action: "unchanged" });
       continue;
     }
-    fs.mkdirSync(path.dirname(t.file), { recursive: true });
-    fs.writeFileSync(t.file, next, "utf8");
+    writeFileAtomic(t.file, next);
     changes.push({
       name: t.name,
       file: t.file,

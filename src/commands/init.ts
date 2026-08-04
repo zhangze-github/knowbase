@@ -11,7 +11,7 @@ import {
 } from "../config.js";
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
-import { installAgentConfig } from "../agent-config.js";
+import { syncAgentConfig } from "../agent-config.js";
 
 export interface InitOptions {
   dir?: string;
@@ -172,7 +172,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("• 已跳过 AI agent 全局提示词配置（--no-agent-config）");
   } else {
     try {
-      const changes = installAgentConfig(dir);
+      const changes = syncAgentConfig(dir);
       for (const c of changes) {
         const verb =
           c.action === "created"
