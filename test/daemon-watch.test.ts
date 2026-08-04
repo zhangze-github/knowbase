@@ -121,4 +121,40 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     const head2 = g(kb, "rev-parse", "HEAD").stdout.trim();
     expect(head2).toBe(head1);
   }, 40000);
+
+  it("索引变更后守护进程自动刷新 CLAUDE.md 中的区块", async () => {
+    const kb = path.join(root, "kb");
+    const init = spawnSync(
+      "node",
+      [CLI, "init", bare, "--dir", kb, "--interval", "3600"],
+      { encoding: "utf8", env: envFor() }
+    );
+    expect(init.status).toBe(0);
+
+    // init 时仓库还没有 index.md → 区块应是回退文案
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    expect(fs.readFileSync(claude, "utf8")).toContain("暂无");
+
+    daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
+
+    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
+    const started = await waitFor(() => {
+      try {
+        return !!JSON.parse(fs.readFileSync(statePath, "utf8")).lastCycleAt;
+      } catch {
+        return false;
+      }
+    }, 10000);
+    expect(started).toBe(true);
+
+    // 写入索引 → 监听触发同步周期 → 周期末刷新区块
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：角色定义\n");
+
+    const refreshed = await waitFor(
+      () => fs.readFileSync(claude, "utf8").includes("角色定义"),
+      15000
+    );
+    expect(refreshed).toBe(true);
+    expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库索引");
+  }, 40000);
 });

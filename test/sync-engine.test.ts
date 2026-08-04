@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { Logger } from "../src/config.js";
-import { syncOnce, commitMessage } from "../src/sync-engine.js";
+import { syncOnce, commitMessage, refreshAgentPrompts } from "../src/sync-engine.js";
 import {
   tmpDir,
   makeOrigin,
@@ -214,5 +214,57 @@ describe("同步引擎", () => {
     syncOnce(mkConfig(bare, B), deps());
     expect(read(B, "a.md")).toContain("from A");
     expect(read(A, "b.md")).toContain("from B");
+  });
+});
+
+describe("refreshAgentPrompts", () => {
+  it("agentConfig:false → 不写任何提示词文件；true → 写入", () => {
+    const base = tmpDir("refresh");
+    const home = path.join(base, "home");
+    const kb = path.join(base, "kb");
+    fs.mkdirSync(home, { recursive: true });
+    fs.mkdirSync(kb, { recursive: true });
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n");
+
+    const lg = new Logger(path.join(base, "log"));
+    refreshAgentPrompts(
+      { repoUrl: "x", dir: kb, interval: 60, branch: "main", agentConfig: false },
+      lg,
+      home
+    );
+    expect(fs.existsSync(path.join(home, ".claude", "CLAUDE.md"))).toBe(false);
+
+    refreshAgentPrompts(
+      { repoUrl: "x", dir: kb, interval: 60, branch: "main", agentConfig: true },
+      lg,
+      home
+    );
+    expect(fs.readFileSync(path.join(home, ".claude", "CLAUDE.md"), "utf8")).toContain(
+      "# 索引"
+    );
+
+    fs.rmSync(base, { recursive: true, force: true });
+  });
+
+  it("写入失败时吞掉异常并记日志，不向外抛", () => {
+    const base = tmpDir("refresh-err");
+    const kb = path.join(base, "kb");
+    fs.mkdirSync(kb, { recursive: true });
+    // home 指向一个普通文件 → mkdirSync(<file>/.claude) 抛 ENOTDIR
+    const brokenHome = path.join(base, "not-a-dir");
+    fs.writeFileSync(brokenHome, "");
+
+    const logFile = path.join(base, "log");
+    const lg = new Logger(logFile);
+    expect(() =>
+      refreshAgentPrompts(
+        { repoUrl: "x", dir: kb, interval: 60, branch: "main" },
+        lg,
+        brokenHome
+      )
+    ).not.toThrow();
+    expect(fs.readFileSync(logFile, "utf8")).toContain("刷新 agent 提示词失败");
+
+    fs.rmSync(base, { recursive: true, force: true });
   });
 });

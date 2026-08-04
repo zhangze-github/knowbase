@@ -13,6 +13,7 @@ import {
 } from "./config.js";
 import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
+import { syncAgentConfig } from "./agent-config.js";
 
 export interface SyncDeps {
   logger: Logger;
@@ -240,6 +241,33 @@ function envInt(name: string, fallback: number): number {
 }
 
 /**
+ * 每个同步周期末刷新 agent 提示词中的知识库索引快照。
+ *
+ * 纯本地读 + 写提示词文件，不碰 git，因此不受 .knowbase-pause 影响。
+ * 任何异常只记日志：不能影响 SyncResult / DaemonState，也不能让守护进程退出。
+ */
+export function refreshAgentPrompts(
+  cfg: Config,
+  logger: Logger,
+  home?: string
+): void {
+  if (cfg.agentConfig === false) return;
+  try {
+    const changes = syncAgentConfig(cfg.dir, home);
+    const touched = changes.filter((c) => c.action !== "unchanged");
+    if (touched.length > 0) {
+      logger.log(
+        `agent 提示词索引已刷新：${touched.map((c) => c.name).join(", ")}`
+      );
+    }
+  } catch (e) {
+    logger.log(
+      `刷新 agent 提示词失败（已忽略）：${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/**
  * 守护进程主体：混合调度。
  * - 上行加速：文件监听 + 防抖（静默 quietMs 触发，maxWaitMs 封顶防饿死），
  *   本地一有改动几秒内即推送，缩小多设备并发编辑的冲突窗口。
@@ -285,6 +313,7 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
       writeDaemonState(state);
       logger.log(`守护循环异常（已捕获）：${state.lastError}`);
     }
+    refreshAgentPrompts(cfg, logger);
   };
 
   // 上行监听（可通过配置 watch:false 关闭；不支持递归监听的平台自动退化）
