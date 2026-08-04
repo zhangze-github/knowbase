@@ -21,11 +21,18 @@ export function cmdUninstall(): number {
     }
   }
 
-  try {
-    getAutostart().uninstall();
-    console.log("• 已注销开机自启并停止守护进程");
-  } catch (e) {
-    console.warn(`⚠ 注销自启时出错：${e instanceof Error ? e.message : String(e)}`);
+  // 与 init 对称的守卫。launchd/systemd 的作业标签是硬编码常量、域名取自 uid，
+  // 两者都不随 HOME 变化：测试把 HOME 指向临时目录也拦不住 bootout 打到开发者
+  // 本机真实的 com.knowbase.daemon 上，跑一次测试就会把自己的知识库同步拆掉。
+  if (process.env.KNOWBASE_SKIP_AUTOSTART === "1") {
+    console.log("• 已跳过自启注销（KNOWBASE_SKIP_AUTOSTART=1）");
+  } else {
+    try {
+      getAutostart().uninstall();
+      console.log("• 已注销开机自启并停止守护进程");
+    } catch (e) {
+      console.warn(`⚠ 注销自启时出错：${e instanceof Error ? e.message : String(e)}`);
+    }
   }
 
   clearDaemonState();

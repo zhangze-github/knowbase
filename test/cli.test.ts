@@ -260,6 +260,25 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(after).not.toContain("KNOWBASE:START");
   });
 
+  it("KNOWBASE_SKIP_AUTOSTART=1 时 uninstall 不注销真实的自启作业", () => {
+    // 回归测试。launchd 的作业标签是硬编码常量、域名取自 uid，两者都不受 HOME
+    // 影响，所以测试里跑 `knowbase uninstall` 会 bootout 开发者本机真实的
+    // com.knowbase.daemon —— 这曾让开发者自己的知识库同步在跑测试时静默停摆。
+    // init 早就有这道守卫，uninstall 漏了。
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+
+    const u = knowbase(["uninstall"]);
+    expect(u.code).toBe(0);
+    expect(u.out).toContain("已跳过自启注销");
+    expect(u.out).not.toContain("已注销开机自启");
+    // 其余卸载动作照常完成
+    expect(u.out).toContain("保留");
+    expect(fs.existsSync(path.join(home, ".config", "knowbase", "config.json"))).toBe(
+      false
+    );
+  });
+
   it("--interval 非法值直接报错", () => {
     const kb = path.join(root, "kb");
     const bad = knowbase(["init", bare, "--dir", kb, "--interval", "abc"]);
