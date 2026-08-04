@@ -277,7 +277,7 @@ git commit -m "feat(agent-config): 索引读取（大小写不敏感定位、标
 
 - [ ] **Step 1: 写失败的测试**
 
-在 `test/agent-config.test.ts` 的 import 中，把 `installAgentConfig` 替换为 `syncAgentConfig`，并把已有 describe `"installAgentConfig / uninstallAgentConfig"` 里的 3 处 `installAgentConfig(` 调用改成 `syncAgentConfig(`（第 73、89 行附近；describe 标题同步改为 `"syncAgentConfig / uninstallAgentConfig"`）。
+在 `test/agent-config.test.ts` 中把 `installAgentConfig` 全部换成 `syncAgentConfig`——共 4 处：第 10 行 import、第 66 行 describe 标题、第 73 行与第 89 行的两处调用。全仓库其余引用只有 `src/commands/init.ts:14` 与 `:175`（本任务 Step 3d/3e 处理），`uninstallAgentConfig` 不改名、不受影响。
 
 然后在文件末尾追加：
 
