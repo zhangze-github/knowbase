@@ -157,4 +157,41 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     expect(refreshed).toBe(true);
     expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库索引");
   }, 40000);
+
+  it("暂停期间仍刷新提示词索引（刷新不碰 git，与 pause 语义无关）", async () => {
+    const kb = path.join(root, "kb");
+    const init = spawnSync(
+      "node",
+      [CLI, "init", bare, "--dir", kb, "--interval", "3600"],
+      { encoding: "utf8", env: envFor() }
+    );
+    expect(init.status).toBe(0);
+
+    // 暂停自动同步：git 侧应停手，提示词刷新仍须照常
+    expect(spawnSync("node", [CLI, "pause"], { env: envFor() }).status).toBe(0);
+    expect(fs.existsSync(path.join(kb, ".knowbase-pause"))).toBe(true);
+
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    expect(fs.readFileSync(claude, "utf8")).toContain("暂无");
+
+    daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
+    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
+    const started = await waitFor(() => {
+      try {
+        return JSON.parse(fs.readFileSync(statePath, "utf8")).paused === true;
+      } catch {
+        return false;
+      }
+    }, 10000);
+    expect(started).toBe(true);
+
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：暂停期间的索引\n");
+    const refreshed = await waitFor(
+      () => fs.readFileSync(claude, "utf8").includes("暂停期间的索引"),
+      15000
+    );
+    expect(refreshed).toBe(true);
+    // git 侧确实没动：索引仍是未提交状态
+    expect(g(kb, "status", "--porcelain").stdout).toContain("index.md");
+  }, 40000);
 });

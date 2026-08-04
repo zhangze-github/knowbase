@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { Logger } from "../src/config.js";
 import { syncOnce, commitMessage, refreshAgentPrompts } from "../src/sync-engine.js";
+import { syncAgentConfig, BLOCK_END } from "../src/agent-config.js";
 import {
   tmpDir,
   makeOrigin,
@@ -218,53 +219,83 @@ describe("同步引擎", () => {
 });
 
 describe("refreshAgentPrompts", () => {
-  it("agentConfig:false → 不写任何提示词文件；true → 写入", () => {
-    const base = tmpDir("refresh");
-    const home = path.join(base, "home");
-    const kb = path.join(base, "kb");
+  let base: string;
+  let home: string;
+  let kb: string;
+  let logFile: string;
+  let lg: Logger;
+  const claude = () => path.join(home, ".claude", "CLAUDE.md");
+  const cfg = (agentConfig?: boolean) => ({
+    repoUrl: "x",
+    dir: kb,
+    interval: 60,
+    branch: "main",
+    agentConfig,
+  });
+
+  beforeEach(() => {
+    base = tmpDir("refresh");
+    home = path.join(base, "home");
+    kb = path.join(base, "kb");
     fs.mkdirSync(home, { recursive: true });
     fs.mkdirSync(kb, { recursive: true });
     fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n");
-
-    const lg = new Logger(path.join(base, "log"));
-    refreshAgentPrompts(
-      { repoUrl: "x", dir: kb, interval: 60, branch: "main", agentConfig: false },
-      lg,
-      home
-    );
-    expect(fs.existsSync(path.join(home, ".claude", "CLAUDE.md"))).toBe(false);
-
-    refreshAgentPrompts(
-      { repoUrl: "x", dir: kb, interval: 60, branch: "main", agentConfig: true },
-      lg,
-      home
-    );
-    expect(fs.readFileSync(path.join(home, ".claude", "CLAUDE.md"), "utf8")).toContain(
-      "# 索引"
-    );
-
+    logFile = path.join(base, "log");
+    lg = new Logger(logFile);
+  });
+  afterEach(() => {
     fs.rmSync(base, { recursive: true, force: true });
   });
 
+  it("agentConfig:false → 不写任何提示词文件", () => {
+    refreshAgentPrompts(cfg(false), lg, home);
+    expect(fs.existsSync(claude())).toBe(false);
+  });
+
+  it("只刷新已存在的区块，从不创建（用户删掉区块即视为退出）", () => {
+    // 区块不存在 → 守护进程不得创建。覆盖两种退出方式：
+    // 老版本 --no-agent-config 接入（配置无该键、被当成开启）、用户手动删区块。
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.existsSync(claude())).toBe(false);
+
+    fs.mkdirSync(path.dirname(claude()), { recursive: true });
+    fs.writeFileSync(claude(), "# 偏好\n我不要 knowbase 区块\n");
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.readFileSync(claude(), "utf8")).not.toContain("KNOWBASE:START");
+
+    // init 建好区块之后，刷新照常生效
+    syncAgentConfig(kb, home);
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 新条目\n");
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.readFileSync(claude(), "utf8")).toContain("新条目");
+  });
+
+  it("区块结束标记缺失 → 记一行说明原因的日志，不动文件", () => {
+    syncAgentConfig(kb, home);
+    const broken = fs
+      .readFileSync(claude(), "utf8")
+      .replace(BLOCK_END, "")
+      .concat("\n# 我后面的重要内容\n别删我\n");
+    fs.writeFileSync(claude(), broken);
+
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.readFileSync(claude(), "utf8")).toBe(broken);
+    const log = fs.readFileSync(logFile, "utf8");
+    expect(log).toContain("结束标记缺失");
+    expect(log).toContain("已跳过");
+  });
+
   it("写入失败时吞掉异常并记日志，不向外抛", () => {
-    const base = tmpDir("refresh-err");
-    const kb = path.join(base, "kb");
-    fs.mkdirSync(kb, { recursive: true });
-    // home 指向一个普通文件 → mkdirSync(<file>/.claude) 抛 ENOTDIR
-    const brokenHome = path.join(base, "not-a-dir");
-    fs.writeFileSync(brokenHome, "");
+    // 先让区块存在（否则 onlyExisting 会直接跳过、根本走不到写盘），再让
+    // rename 必然失败，检验异常被吞在 refreshAgentPrompts 内部。
+    syncAgentConfig(kb, home);
+    const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("模拟 rename 失败");
+    });
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 触发一次真实写入\n");
 
-    const logFile = path.join(base, "log");
-    const lg = new Logger(logFile);
-    expect(() =>
-      refreshAgentPrompts(
-        { repoUrl: "x", dir: kb, interval: 60, branch: "main" },
-        lg,
-        brokenHome
-      )
-    ).not.toThrow();
+    expect(() => refreshAgentPrompts(cfg(true), lg, home)).not.toThrow();
+    spy.mockRestore();
     expect(fs.readFileSync(logFile, "utf8")).toContain("刷新 agent 提示词失败");
-
-    fs.rmSync(base, { recursive: true, force: true });
   });
 });

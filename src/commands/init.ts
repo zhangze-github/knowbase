@@ -180,6 +180,16 @@ export function cmdInit(url: string, opts: InitOptions): number {
     try {
       const changes = syncAgentConfig(dir);
       for (const c of changes) {
+        if (c.action === "skipped") {
+          console.warn(
+            `⚠ ${c.name} 全局提示词未更新：${c.file} 里的 knowbase 区块不完整` +
+              `（有 KNOWBASE:START 但缺 KNOWBASE:END）。`
+          );
+          console.warn(
+            "  为避免删掉标记之后的内容已跳过；请手动检查该文件、删除残留的 KNOWBASE:START 后重跑 init。"
+          );
+          continue;
+        }
         const verb =
           c.action === "created"
             ? "已创建并写入"

@@ -179,10 +179,13 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    // 仓库无 index.md → 提示缺失并计入需要注意
+    // 仓库无 index.md → 给出提示，但这是 day one 的正常状态，不算异常
     const missing = knowbase(["status"]);
     expect(missing.out).toContain("agent 提示词");
-    expect(missing.out).toContain("index.md");
+    expect(missing.out).toContain("暂无 index.md");
+    // 「需要注意」汇总里不得出现索引缺失（否则每个新团队的 status 永久非零退出）
+    const attention = missing.out.split("需要注意：")[1] ?? "";
+    expect(attention).not.toContain("index.md");
 
     // 有 index.md → 报告文件名与体积
     fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/\n");
@@ -192,6 +195,49 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     // 关闭开关 → 报告已关闭
     expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
     expect(knowbase(["status"]).out).toContain("agent 提示词：已关闭");
+  });
+
+  it("零字节 index.md → 区块回退文案与 status 口径一致", () => {
+    const kb = path.join(root, "kb");
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+
+    fs.writeFileSync(path.join(kb, "index.md"), "");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+
+    // 区块：走回退文案，不出现空的索引小节
+    const content = fs.readFileSync(claude, "utf8");
+    expect(content).not.toContain("### 知识库索引");
+    expect(content).toContain("暂无");
+    // status：报告「存在但为空」，不报「已注入 0.0KB」
+    const st = knowbase(["status"]);
+    expect(st.out).toContain("index.md 存在但为空");
+    expect(st.out).not.toContain("已注入 index.md（0.0KB）");
+  });
+
+  it("索引含 KNOWBASE:END 字样时 init→uninstall 全链路不吞用户内容", () => {
+    const kb = path.join(root, "kb");
+    const claude = path.join(home, ".claude", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(claude), { recursive: true });
+    fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    // 索引正文里出现区块结束标记字样（例如索引记录了 knowbase 自身的文档）
+    fs.writeFileSync(
+      path.join(kb, "index.md"),
+      "# 索引\n- knowbase/：区块以 KNOWBASE:END 收尾\n"
+    );
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+
+    const withBlock = fs.readFileSync(claude, "utf8");
+    expect(withBlock).toContain("KNOWBASE_END"); // 已中和
+    expect(withBlock.split("KNOWBASE:END").length - 1).toBe(1); // 真结束标记只有一个
+
+    expect(knowbase(["uninstall"]).code).toBe(0);
+    const after = fs.readFileSync(claude, "utf8");
+    expect(after).toContain("始终用中文回答");
+    expect(after).not.toContain("KNOWBASE");
+    expect(after).not.toContain("knowbase/：");
   });
 
   it("uninstall 保留本地文件夹并移除全局提示词区块", () => {

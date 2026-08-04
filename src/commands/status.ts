@@ -123,9 +123,16 @@ export function cmdStatus(): number {
   } else {
     const idx = readIndex(cfg.dir);
     if (!idx.name) {
-      console.log("agent 提示词：已启用，但知识库根目录没有 index.md");
-      anomalies.push(
-        "知识库根目录缺少 index.md——agent 拿不到内容地图，确认索引维护 agent 是否在运行。"
+      // 不计入 anomalies：knowbase 不生成也不播种 index.md，「根目录还没有索引」
+      // 是每个团队 day one 的正常状态，计入会让 status 永久非零退出、
+      // 把拿退出码做监控的包装脚本永久标红。
+      console.log(
+        "agent 提示词：已启用；知识库根目录暂无 index.md，区块中改为提示 agent 直接 grep 全库"
+      );
+    } else if ((idx.text ?? "").trim() === "") {
+      // 与 buildBlock 的空索引判断保持同一口径：文件在但没内容，不报「已注入 0.0KB」
+      console.log(
+        `agent 提示词：已启用；${idx.name} 存在但为空，区块中改为提示 agent 直接 grep 全库`
       );
     } else {
       const kb = (idx.bytes / 1024).toFixed(1);

@@ -245,6 +245,9 @@ function envInt(name: string, fallback: number): number {
  *
  * 纯本地读 + 写提示词文件，不碰 git，因此不受 .knowbase-pause 影响。
  * 任何异常只记日志：不能影响 SyncResult / DaemonState，也不能让守护进程退出。
+ *
+ * onlyExisting：只刷新 init 建好的区块、从不创建。区块是用户个人提示词文件里的
+ * 内容，删掉它就是「别再往我的提示词里塞东西」最自然的表达，后台不该写回去。
  */
 export function refreshAgentPrompts(
   cfg: Config,
@@ -253,8 +256,17 @@ export function refreshAgentPrompts(
 ): void {
   if (cfg.agentConfig === false) return;
   try {
-    const changes = syncAgentConfig(cfg.dir, home);
-    const touched = changes.filter((c) => c.action !== "unchanged");
+    const changes = syncAgentConfig(cfg.dir, home, { onlyExisting: true });
+    for (const c of changes) {
+      if (c.action !== "skipped") continue;
+      logger.log(
+        `${c.name} 提示词 ${c.file} 中区块结束标记缺失，已跳过刷新` +
+          `（强行写入会删掉标记之后的用户内容）；请手动检查该文件`
+      );
+    }
+    const touched = changes.filter(
+      (c) => c.action === "created" || c.action === "updated"
+    );
     if (touched.length > 0) {
       logger.log(
         `agent 提示词索引已刷新：${touched.map((c) => c.name).join(", ")}`

@@ -82,7 +82,14 @@ export interface IndexResult {
   truncated: boolean;
 }
 
-const EMPTY_INDEX: IndexResult = { name: null, text: null, bytes: 0, truncated: false };
+// 冻结：这是被多条路径按引用返回的共享单例，任何调用方顺手改一个字段都会污染
+// 后续所有调用。冻结把这种静默污染变成立即的 TypeError。
+const EMPTY_INDEX: IndexResult = Object.freeze({
+  name: null,
+  text: null,
+  bytes: 0,
+  truncated: false,
+});
 
 /**
  * 读取知识库根索引并规范化为可内嵌的正文。
@@ -119,7 +126,10 @@ export function readIndex(dir: string): IndexResult {
  * index 传 null / undefined 时输出回退文案（索引维护 agent 还没跑起来的情况）。
  */
 export function buildBlock(dir: string, index?: string | null): string {
-  const indexSection = index
+  // 纯空白的索引（含零字节文件）也走回退文案：否则会输出一个有标题没正文的
+  // 段落，且与 status 「存在但为空」的口径打架。
+  const hasIndex = index != null && index.trim() !== "";
+  const indexSection = hasIndex
     ? `### 知识库索引（根 ${INDEX_NAME} 快照，由 knowbase 自动同步）
 
 ${index}`
@@ -146,8 +156,16 @@ ${indexSection}
 ${BLOCK_END}`;
 }
 
-/** 用新区块替换旧区块；无旧区块则追加到文末。返回处理后的完整内容。 */
-export function upsertBlock(content: string, block: string): string {
+/**
+ * 用新区块替换旧区块；无旧区块则追加到文末。返回处理后的完整内容。
+ *
+ * 返回 null 表示「有起始标记但没有结束标记」——无法安全定位区块边界，调用方
+ * 应跳过该文件。这是本函数唯一的失败模式：改为守护进程每周期都写之后，任何
+ * 第三方非原子写入（另一个 dotfile 工具、编辑器崩溃、agent 编辑 CLAUDE.md）
+ * 都可能留下这种半截状态；若按「从起始处替换到文末」修补，会永久删掉标记
+ * 之后的全部用户内容。
+ */
+export function upsertBlock(content: string, block: string): string | null {
   const startIdx = content.indexOf(BLOCK_START);
   if (startIdx !== -1) {
     const endMarker = content.indexOf(BLOCK_END, startIdx);
@@ -155,8 +173,7 @@ export function upsertBlock(content: string, block: string): string {
       const endIdx = endMarker + BLOCK_END.length;
       return content.slice(0, startIdx) + block + content.slice(endIdx);
     }
-    // 有起始无结束（异常/被截断）：从起始处起全部替换
-    return content.slice(0, startIdx) + block + "\n";
+    return null;
   }
   if (content.trim() === "") return block + "\n";
   const sep = content.endsWith("\n") ? "\n" : "\n\n";
@@ -182,20 +199,52 @@ export function stripBlock(content: string): { content: string; removed: boolean
 export interface AgentConfigChange {
   name: string;
   file: string;
-  /** created=新建文件；updated=更新区块；unchanged=已是最新 */
-  action: "created" | "updated" | "unchanged";
+  /**
+   * created=新建文件；updated=更新区块；unchanged=已是最新（或按 onlyExisting 跳过）；
+   * skipped=区块残缺无法安全写入，已放弃
+   */
+  action: "created" | "updated" | "unchanged" | "skipped";
+}
+
+/** syncAgentConfig 的可选行为。 */
+export interface SyncAgentConfigOptions {
+  /**
+   * 只刷新已存在的区块，绝不创建。守护进程用；init 不用。
+   * 用户手动删掉区块、或当年用 --no-agent-config 接入（配置里没有该键、被
+   * loadConfig 当成默认开启）时，后台不该把区块重新塞回个人提示词文件。
+   */
+  onlyExisting?: boolean;
 }
 
 /**
- * 原子写入：同目录临时文件 + rename。
+ * 原子写入：真实文件同目录临时文件 + rename。
  * 这些是用户的个人提示词文件，改为每个同步周期都可能触发的周期性写入后，
  * 进程在错误时机被 kill 会留下截断的 CLAUDE.md，损坏代价高。
  */
 function writeFileAtomic(file: string, content: string): void {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.knowbase-tmp`;
-  fs.writeFileSync(tmp, content, "utf8");
-  fs.renameSync(tmp, file);
+  // 先解析真实路径：dotfiles 仓库常把 ~/.claude/CLAUDE.md 做成指向仓库副本的
+  // 软链。renameSync 不跟随软链，会 unlink 掉软链、换上一个普通文件——仓库副本
+  // 从此静默失联，用户之后在仓库里的手改对 agent 完全不可见，且毫无提示。
+  // 解析后写真实文件，既保住软链，也保证 rename 始终同目录、同文件系统（软链
+  // 跨卷是唯一会引发 EXDEV 的情况）。
+  const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  // 临时名带 pid：守护进程的周期刷新与用户手跑的 init 会同时写同一个目标文件，
+  // 共用一个固定临时名会让两个进程交错写入同一临时文件再各自 rename，产出的
+  // 正是原子写本来要防的那种交错损坏内容。
+  const tmp = `${target}.knowbase-tmp-${process.pid}`;
+  try {
+    fs.writeFileSync(tmp, content, "utf8");
+    fs.renameSync(tmp, target);
+  } catch (e) {
+    // 失败时残留的临时文件会永久留在 ~/.claude/ 下；清理本身失败不能掩盖原始错误。
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // ignore
+    }
+    throw e;
+  }
 }
 
 /**
@@ -204,14 +253,24 @@ function writeFileAtomic(file: string, content: string): void {
  */
 export function syncAgentConfig(
   dir: string,
-  home: string = os.homedir()
+  home: string = os.homedir(),
+  opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
   const block = buildBlock(dir, readIndex(dir).text);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);
+    // 读取用原路径：读操作穿透软链，语义正确。
     const prev = existed ? fs.readFileSync(t.file, "utf8") : "";
+    if (opts.onlyExisting && !prev.includes(BLOCK_START)) {
+      changes.push({ name: t.name, file: t.file, action: "unchanged" });
+      continue;
+    }
     const next = upsertBlock(prev, block);
+    if (next === null) {
+      changes.push({ name: t.name, file: t.file, action: "skipped" });
+      continue;
+    }
     if (next === prev) {
       changes.push({ name: t.name, file: t.file, action: "unchanged" });
       continue;

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -261,5 +261,145 @@ describe("区块内嵌索引", () => {
     const left = fs.readdirSync(path.join(home, ".claude"));
     expect(left.some((f) => f.includes("knowbase-tmp"))).toBe(false);
     expect(left).toContain("CLAUDE.md");
+  });
+
+  it("零字节 index.md → 区块走回退文案（与 status 口径一致）", () => {
+    fs.writeFileSync(path.join(kb, "index.md"), "");
+    syncAgentConfig(kb, home);
+    const content = fs.readFileSync(claudeFile(), "utf8");
+    expect(content).not.toContain("### 知识库索引");
+    expect(content).toContain("暂无");
+  });
+});
+
+describe("buildBlock 空索引口径", () => {
+  it("空串 / 纯空白索引 → 与 null 同样走回退文案", () => {
+    for (const empty of ["", "   \n\t\n"]) {
+      const b = buildBlock("/kb", empty);
+      expect(b).not.toContain("### 知识库索引");
+      expect(b).toContain("暂无");
+    }
+  });
+});
+
+describe("upsertBlock 结束标记缺失", () => {
+  it("有 START 无 END → 返回 null（不截断用户内容）", () => {
+    const broken = `# 偏好\n${BLOCK_START}\n半截区块\n\n# 我后面的重要内容\n别删我\n`;
+    expect(upsertBlock(broken, buildBlock("/kb"))).toBe(null);
+  });
+});
+
+describe("原子写安全性（并发 / 软链）", () => {
+  let kb: string;
+  beforeEach(() => {
+    kb = tmpDir("kb");
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：角色定义\n");
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    fs.rmSync(kb, { recursive: true, force: true });
+  });
+
+  const claudeFile = () => path.join(home, ".claude", "CLAUDE.md");
+
+  it("C1: 临时文件名带 pid，不与其他进程算出同一路径", () => {
+    // 旧实现用固定的 <file>.knowbase-tmp：daemon 的周期刷新与用户手跑的 init
+    // 会算出同一个临时路径、交错写入再各自 rename。这里用一个目录占住旧路径，
+    // 实现若仍用固定名，writeFileSync 会直接 EISDIR。
+    fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+    fs.mkdirSync(path.join(home, ".claude", "CLAUDE.md.knowbase-tmp"));
+
+    const spy = vi.spyOn(fs, "writeFileSync");
+    const changes = syncAgentConfig(kb, home);
+    const tmpPaths = spy.mock.calls
+      .map((c) => String(c[0]))
+      .filter((p) => p.includes("knowbase-tmp"));
+
+    expect(changes.every((c) => c.action === "created")).toBe(true);
+    expect(tmpPaths.length).toBeGreaterThan(0);
+    expect(
+      tmpPaths.every((p) => p.endsWith(`.knowbase-tmp-${process.pid}`))
+    ).toBe(true);
+    expect(fs.readFileSync(claudeFile(), "utf8")).toContain("角色定义");
+  });
+
+  it("C1: 写入过程失败 → 临时文件被清理，异常继续上抛", () => {
+    vi.spyOn(fs, "renameSync").mockImplementation(() => {
+      throw new Error("模拟 rename 失败");
+    });
+    expect(() => syncAgentConfig(kb, home)).toThrow("模拟 rename 失败");
+    vi.restoreAllMocks();
+
+    const left = fs.readdirSync(path.join(home, ".claude"));
+    expect(left.filter((f) => f.includes("knowbase-tmp"))).toEqual([]);
+  });
+
+  it("C2: 目标是软链时穿透写入，软链本身保持不变", () => {
+    // dotfiles 仓库场景：~/.claude/CLAUDE.md 是指向仓库副本的软链。
+    const repoCopy = path.join(home, "dotfiles", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(repoCopy), { recursive: true });
+    fs.writeFileSync(repoCopy, "# 全局偏好\n始终用中文回答。\n");
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.symlinkSync(repoCopy, claudeFile());
+
+    syncAgentConfig(kb, home);
+
+    expect(fs.lstatSync(claudeFile()).isSymbolicLink()).toBe(true);
+    const written = fs.readFileSync(repoCopy, "utf8");
+    expect(written).toContain("角色定义");
+    expect(written).toContain("始终用中文回答");
+    // 临时文件应落在真实文件所在目录并已被 rename 掉
+    expect(
+      fs.readdirSync(path.dirname(repoCopy)).filter((f) => f.includes("knowbase-tmp"))
+    ).toEqual([]);
+  });
+
+  it("I4: 结束标记缺失 → action=skipped，文件一字未动", () => {
+    const broken = `# 偏好\n${BLOCK_START}\n半截区块\n\n# 我后面的重要内容\n别删我\n`;
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.writeFileSync(claudeFile(), broken);
+
+    const changes = syncAgentConfig(kb, home);
+    const byName = Object.fromEntries(changes.map((c) => [c.name, c]));
+    expect(byName["Claude Code"].action).toBe("skipped");
+    expect(fs.readFileSync(claudeFile(), "utf8")).toBe(broken);
+    // Codex 侧不受影响，照常创建
+    expect(byName["Codex"].action).toBe("created");
+  });
+
+  it("I1: onlyExisting 时无区块不创建、有区块照常刷新", () => {
+    // 文件不存在 → 不创建
+    const noneChanges = syncAgentConfig(kb, home, { onlyExisting: true });
+    expect(noneChanges.every((c) => c.action === "unchanged")).toBe(true);
+    expect(fs.existsSync(claudeFile())).toBe(false);
+
+    // 文件存在但用户手动删掉了区块 → 不写回
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.writeFileSync(claudeFile(), "# 偏好\n我删掉了 knowbase 区块\n");
+    expect(
+      syncAgentConfig(kb, home, { onlyExisting: true }).every(
+        (c) => c.action === "unchanged"
+      )
+    ).toBe(true);
+    expect(fs.readFileSync(claudeFile(), "utf8")).not.toContain(BLOCK_START);
+
+    // init 建过区块之后 → onlyExisting 正常刷新
+    syncAgentConfig(kb, home);
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 新条目\n");
+    const refreshed = syncAgentConfig(kb, home, { onlyExisting: true });
+    expect(refreshed.find((c) => c.name === "Claude Code")!.action).toBe("updated");
+    expect(fs.readFileSync(claudeFile(), "utf8")).toContain("新条目");
+  });
+});
+
+describe("空索引结果不可变", () => {
+  it("readIndex 的空结果被冻结，误改立即报错", () => {
+    const kb = tmpDir("kb-frozen");
+    const r = readIndex(kb);
+    expect(r.name).toBe(null);
+    expect(() => {
+      (r as { bytes: number }).bytes = 99;
+    }).toThrow(TypeError);
+    fs.rmSync(kb, { recursive: true, force: true });
   });
 });
