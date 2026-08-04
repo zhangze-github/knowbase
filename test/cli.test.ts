@@ -175,6 +175,25 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(st.code).not.toBe(0);
   });
 
+  it("status 报告索引注入状态：缺失 / 已注入 / 已关闭", () => {
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+
+    // 仓库无 index.md → 提示缺失并计入需要注意
+    const missing = knowbase(["status"]);
+    expect(missing.out).toContain("agent 提示词");
+    expect(missing.out).toContain("index.md");
+
+    // 有 index.md → 报告文件名与体积
+    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/\n");
+    const injected = knowbase(["status"]);
+    expect(injected.out).toMatch(/agent 提示词：已注入 index\.md（[\d.]+KB）/);
+
+    // 关闭开关 → 报告已关闭
+    expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
+    expect(knowbase(["status"]).out).toContain("agent 提示词：已关闭");
+  });
+
   it("uninstall 保留本地文件夹并移除全局提示词区块", () => {
     const kb = path.join(root, "kb");
     const claude = path.join(home, ".claude", "CLAUDE.md");

@@ -11,6 +11,7 @@ import {
 } from "../config.js";
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
+import { readIndex, INDEX_MAX_BYTES } from "../agent-config.js";
 
 /** 递归扫描冲突副本（跳过 .git / node_modules，限制深度防止巨树卡顿）。 */
 function findConflictCopies(dir: string, depth = 0, acc: string[] = []): string[] {
@@ -114,6 +115,24 @@ export function cmdStatus(): number {
   }
   console.log(`本地未提交改动：${uncommitted} 个文件`);
   console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
+
+  // agent 提示词索引（这个机制默认静默运行，必须给出可见性）
+  console.log("");
+  if (cfg.agentConfig === false) {
+    console.log("agent 提示词：已关闭（init 时用了 --no-agent-config）");
+  } else {
+    const idx = readIndex(cfg.dir);
+    if (!idx.name) {
+      console.log("agent 提示词：已启用，但知识库根目录没有 index.md");
+      anomalies.push(
+        "知识库根目录缺少 index.md——agent 拿不到内容地图，确认索引维护 agent 是否在运行。"
+      );
+    } else {
+      const kb = (idx.bytes / 1024).toFixed(1);
+      const note = idx.truncated ? `，超 ${INDEX_MAX_BYTES / 1024}KB 已截断` : "";
+      console.log(`agent 提示词：已注入 ${idx.name}（${kb}KB${note}）`);
+    }
+  }
 
   // 冲突副本
   const copies = findConflictCopies(cfg.dir);
