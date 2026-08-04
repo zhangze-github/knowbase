@@ -27,6 +27,8 @@ export interface Config {
   branch: string;
   /** 是否启用文件监听上行加速（默认 true；手动改配置可关）。 */
   watch?: boolean;
+  /** 是否维护 AI agent 全局提示词托管区块（默认 true；init --no-agent-config 存 false）。 */
+  agentConfig?: boolean;
 }
 
 /** 配置目录：$XDG_CONFIG_HOME/knowbase 或 ~/.config/knowbase 。 */
@@ -140,6 +142,7 @@ export function loadConfig(): Config {
     interval: parsed.interval ?? DEFAULT_INTERVAL,
     branch: parsed.branch ?? DEFAULT_BRANCH,
     watch: parsed.watch !== false,
+    agentConfig: parsed.agentConfig !== false,
   };
 }
 

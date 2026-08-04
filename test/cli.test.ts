@@ -111,6 +111,18 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.existsSync(path.join(home, ".codex", "AGENTS.md"))).toBe(false);
   });
 
+  it("agentConfig 开关持久化进 config.json", () => {
+    const kb = path.join(root, "kb");
+    const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+
+    expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).agentConfig).toBe(false);
+
+    // 默认 init（复用同目录）→ 开关回到 true
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).agentConfig).toBe(true);
+  });
+
   it("init → 写文件 → sync 推送 → 另一 clone 可见", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);

@@ -151,7 +151,13 @@ export function cmdInit(url: string, opts: InitOptions): number {
   }
 
   // 4. 保存配置
-  const cfg: Config = { repoUrl: url, dir, interval, branch };
+  const cfg: Config = {
+    repoUrl: url,
+    dir,
+    interval,
+    branch,
+    agentConfig: opts.agentConfig !== false,
+  };
   saveConfig(cfg);
   console.log("• 已保存配置");
 
