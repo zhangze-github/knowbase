@@ -26,6 +26,93 @@ export function agentTargets(home: string = os.homedir()): AgentTarget[] {
   ];
 }
 
+/** 索引文件的规范名。查找时大小写不敏感。 */
+export const INDEX_NAME = "index.md";
+
+/** 内嵌索引的字节上限（约 2k token）。索引长起来会静默吃掉每次会话的上下文预算。 */
+export const INDEX_MAX_BYTES = 8192;
+
+/**
+ * 从目录条目名中挑出索引文件名，大小写不敏感。
+ *
+ * APFS 默认大小写不敏感、Linux 敏感：按字面 index.md 查找会导致仓库里存在
+ * Index.md 时「macOS 上索引生效、Linux 上索引缺失」的跨平台不一致。
+ *
+ * 写成接受条目名数组的纯函数，是因为「多个大小写变体并存」在大小写不敏感的
+ * 文件系统上无法落盘构造，只能这样测。
+ */
+export function pickIndexName(entries: string[]): string | null {
+  const matches = entries.filter((e) => e.toLowerCase() === INDEX_NAME);
+  if (matches.length === 0) return null;
+  if (matches.includes(INDEX_NAME)) return INDEX_NAME;
+  return [...matches].sort()[0];
+}
+
+/**
+ * 中和索引正文中的区块标记字样。
+ *
+ * 索引由外部 agent 生成，正文里完全可能出现 KNOWBASE:END（例如索引记录了
+ * knowbase 自身的文档）。若原样内嵌，upsertBlock / stripBlock 会匹配到提前
+ * 出现的结束标记、切错位置，吞掉用户 CLAUDE.md 中区块之后的内容。
+ */
+export function neutralizeMarkers(text: string): string {
+  return text.replace(/KNOWBASE:(START|END)/g, "KNOWBASE_$1");
+}
+
+/** 按字节上限截断，切点落在不超限的最后一个换行处。 */
+function truncateAtLine(text: string, max: number): { text: string; truncated: boolean } {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length <= max) return { text, truncated: false };
+  const head = buf.subarray(0, max).toString("utf8");
+  const cut = head.lastIndexOf("\n");
+  // 无换行可切（单行超长）时退化为按字符切，并去掉多字节字符被切断产生的替换符
+  const kept = cut > 0 ? head.slice(0, cut) : head.replace(/�+$/, "");
+  return { text: kept, truncated: true };
+}
+
+export interface IndexResult {
+  /** 实际命中的文件名（如 index.md / Index.md）；未找到为 null。 */
+  name: string | null;
+  /** 规范化后可直接内嵌的正文；未找到为 null。 */
+  text: string | null;
+  /** 索引文件原始字节数（供 status 展示）。 */
+  bytes: number;
+  /** 是否因超过 INDEX_MAX_BYTES 被截断。 */
+  truncated: boolean;
+}
+
+const EMPTY_INDEX: IndexResult = { name: null, text: null, bytes: 0, truncated: false };
+
+/**
+ * 读取知识库根索引并规范化为可内嵌的正文。
+ * 目录不存在 / 无索引 / 读取失败一律返回空结果，绝不抛错——
+ * 索引维护 agent 尚未跑起来时 init 不该失败。
+ */
+export function readIndex(dir: string): IndexResult {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return EMPTY_INDEX;
+  }
+  const name = pickIndexName(entries);
+  if (!name) return EMPTY_INDEX;
+
+  let raw: string;
+  try {
+    raw = fs.readFileSync(path.join(dir, name), "utf8");
+  } catch {
+    return EMPTY_INDEX;
+  }
+
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const cut = truncateAtLine(neutralizeMarkers(raw), INDEX_MAX_BYTES);
+  const text = cut.truncated
+    ? `${cut.text}\n\n…（索引过长已截断，完整内容见 \`${path.join(dir, name)}\`）`
+    : cut.text;
+  return { name, text, bytes, truncated: cut.truncated };
+}
+
 /** 生成托管区块正文（含起止标记），内嵌本机知识库目录。 */
 export function buildBlock(dir: string): string {
   return `${BLOCK_START}

@@ -10,6 +10,9 @@ import {
   installAgentConfig,
   uninstallAgentConfig,
   agentTargets,
+  pickIndexName,
+  readIndex,
+  INDEX_MAX_BYTES,
 } from "../src/agent-config.js";
 import { tmpDir } from "./helpers.js";
 
@@ -103,5 +106,69 @@ describe("installAgentConfig / uninstallAgentConfig", () => {
       path.join(home, ".claude", "CLAUDE.md"),
       path.join(home, ".codex", "AGENTS.md"),
     ]);
+  });
+});
+
+describe("索引读取", () => {
+  let kb: string;
+  beforeEach(() => {
+    kb = tmpDir("kb");
+  });
+  afterEach(() => {
+    fs.rmSync(kb, { recursive: true, force: true });
+  });
+
+  it("pickIndexName 大小写不敏感", () => {
+    expect(pickIndexName(["README.md", "Index.md"])).toBe("Index.md");
+    expect(pickIndexName(["INDEX.MD"])).toBe("INDEX.MD");
+    expect(pickIndexName(["readme.md", "角色"])).toBe(null);
+    expect(pickIndexName([])).toBe(null);
+  });
+
+  it("pickIndexName 并存变体时取值确定：优先精确小写", () => {
+    // 并存状态只可能出现在大小写敏感的文件系统上，无法在 macOS 落盘构造，
+    // 因此选取逻辑写成纯函数，直接喂条目名数组来测。
+    expect(pickIndexName(["Index.md", "index.md", "INDEX.md"])).toBe("index.md");
+    // 无精确匹配 → 排序首个（'N' < 'n'，故 INDEX.md 在前）
+    expect(pickIndexName(["Index.md", "INDEX.md"])).toBe("INDEX.md");
+  });
+
+  it("索引缺失 → 全部为空且不抛错", () => {
+    const r = readIndex(kb);
+    expect(r.name).toBe(null);
+    expect(r.text).toBe(null);
+    expect(r.bytes).toBe(0);
+    expect(r.truncated).toBe(false);
+  });
+
+  it("目录不存在 → 不抛错", () => {
+    const r = readIndex(path.join(kb, "nope"));
+    expect(r.name).toBe(null);
+  });
+
+  it("读取 Index.md 并中和标记字样", () => {
+    fs.writeFileSync(
+      path.join(kb, "Index.md"),
+      "# 索引\n- knowbase 的区块以 KNOWBASE:END 结尾\n"
+    );
+    const r = readIndex(kb);
+    expect(r.name).toBe("Index.md");
+    expect(r.text).toContain("# 索引");
+    expect(r.text).not.toContain("KNOWBASE:END");
+    expect(r.text).toContain("KNOWBASE_END");
+    expect(r.truncated).toBe(false);
+  });
+
+  it("超 8KB → 行边界截断并附提示", () => {
+    const line = "x".repeat(99) + "\n"; // 100 字节/行
+    fs.writeFileSync(path.join(kb, "index.md"), line.repeat(100)); // 10000 字节
+    const r = readIndex(kb);
+    expect(r.bytes).toBe(10000);
+    expect(r.truncated).toBe(true);
+    expect(r.text!).toContain("已截断");
+    // 正文部分（提示前）必须整行完整，且不超上限
+    const body = r.text!.split("\n\n…")[0];
+    expect(body.split("\n").every((l) => l === "x".repeat(99))).toBe(true);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
   });
 });
