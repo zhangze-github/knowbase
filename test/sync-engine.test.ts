@@ -244,6 +244,9 @@ describe("refreshAgentPrompts", () => {
     lg = new Logger(logFile);
   });
   afterEach(() => {
+    // 兜底还原 spy：下面的 renameSync mock 在断言失败时不会走到内联 restore，
+    // 之后追加的用例会继承一个必然抛错的 renameSync。
+    vi.restoreAllMocks();
     fs.rmSync(base, { recursive: true, force: true });
   });
 

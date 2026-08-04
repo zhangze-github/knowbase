@@ -216,6 +216,30 @@ export interface SyncAgentConfigOptions {
   onlyExisting?: boolean;
 }
 
+/** 软链逐跳解析的上限，防御成环的软链。 */
+const MAX_LINK_HOPS = 8;
+
+/**
+ * 解析出真正该写入的路径。
+ * 常规情况（文件存在、或软链的目标存在）由 realpathSync 一次解析到底，链式软链
+ * 也能完整走通。realpathSync 解析不了「悬空软链」——链在、目标文件还没建——但
+ * 那种链同样必须保住：直接 rename 会把链换成普通文件，仓库副本永远不会被创建。
+ * 于是退化为逐跳 readlink，走到第一个不是软链的位置。
+ */
+function resolveWriteTarget(file: string): string {
+  try {
+    return fs.realpathSync(file);
+  } catch {
+    let cur = file;
+    for (let i = 0; i < MAX_LINK_HOPS; i++) {
+      const st = fs.lstatSync(cur, { throwIfNoEntry: false });
+      if (!st?.isSymbolicLink()) return cur;
+      cur = path.resolve(path.dirname(cur), fs.readlinkSync(cur));
+    }
+    return cur;
+  }
+}
+
 /**
  * 原子写入：真实文件同目录临时文件 + rename。
  * 这些是用户的个人提示词文件，改为每个同步周期都可能触发的周期性写入后，
@@ -227,7 +251,7 @@ function writeFileAtomic(file: string, content: string): void {
   // 从此静默失联，用户之后在仓库里的手改对 agent 完全不可见，且毫无提示。
   // 解析后写真实文件，既保住软链，也保证 rename 始终同目录、同文件系统（软链
   // 跨卷是唯一会引发 EXDEV 的情况）。
-  const target = fs.existsSync(file) ? fs.realpathSync(file) : file;
+  const target = resolveWriteTarget(file);
   fs.mkdirSync(path.dirname(target), { recursive: true });
   // 临时名带 pid：守护进程的周期刷新与用户手跑的 init 会同时写同一个目标文件，
   // 共用一个固定临时名会让两个进程交错写入同一临时文件再各自 rename，产出的

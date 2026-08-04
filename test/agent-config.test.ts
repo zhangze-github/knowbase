@@ -354,6 +354,38 @@ describe("原子写安全性（并发 / 软链）", () => {
     ).toEqual([]);
   });
 
+  it("C2: 悬空软链（目标尚未创建）同样保住软链，并建出目标文件", () => {
+    // 先建软链、后建仓库副本是 dotfiles 的常见顺序；existsSync 对悬空软链返回
+    // false，若据此当普通文件处理，rename 会把链换掉、仓库副本永远建不出来。
+    const repoCopy = path.join(home, "dotfiles", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(repoCopy), { recursive: true });
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.symlinkSync(repoCopy, claudeFile());
+    expect(fs.existsSync(claudeFile())).toBe(false); // 悬空
+
+    syncAgentConfig(kb, home);
+
+    expect(fs.lstatSync(claudeFile()).isSymbolicLink()).toBe(true);
+    expect(fs.existsSync(repoCopy)).toBe(true);
+    expect(fs.readFileSync(repoCopy, "utf8")).toContain("角色定义");
+  });
+
+  it("C2: 两跳软链链路完整保住，只写到最末端的真实文件", () => {
+    const repoCopy = path.join(home, "dotfiles", "CLAUDE.md");
+    fs.mkdirSync(path.dirname(repoCopy), { recursive: true });
+    fs.writeFileSync(repoCopy, "# 偏好\n");
+    const mid = path.join(home, "mid-CLAUDE.md");
+    fs.symlinkSync(repoCopy, mid);
+    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+    fs.symlinkSync(mid, claudeFile());
+
+    syncAgentConfig(kb, home);
+
+    expect(fs.lstatSync(claudeFile()).isSymbolicLink()).toBe(true);
+    expect(fs.lstatSync(mid).isSymbolicLink()).toBe(true);
+    expect(fs.readFileSync(repoCopy, "utf8")).toContain("角色定义");
+  });
+
   it("I4: 结束标记缺失 → action=skipped，文件一字未动", () => {
     const broken = `# 偏好\n${BLOCK_START}\n半截区块\n\n# 我后面的重要内容\n别删我\n`;
     fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
