@@ -15,7 +15,7 @@
   "author": "zhangze",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/zhangze-github/lorebase.git"
+    "url": "git+https://github.com/zhangze-github/knowbase.git"
   },
   "type": "module",
   "bin": {
