@@ -339,14 +339,16 @@ describe("push 无权限熔断", () => {
     const gate = new PushGate();
     syncOnce(cfg, { ...at(T0), pushGate: gate });
 
-    // 注：步长改为 50_000（而非直觉的 60_000）。PROBE_INTERVAL_MS 是 300_000，
-    // PushGate.shouldAttempt 在到点（>=）时会真的放行一次探测（Task 2 规格明确如此），
-    // 若步长用 60_000，第 5 轮 T0+300_000 恰好等于探测窗口，会触发一次真实（仍被拒绝
-    // 的）push 尝试，与本用例「连跑多轮全程只跳过」的断言矛盾——不是实现的 bug，
-    // 是这个用例的时间取值撞上了窗口边界，因此收窄步长让全部 5 轮都严格落在窗口内。
-    for (let i = 1; i <= 5; i++) {
+    // PushGate.shouldAttempt 在到点（>=）时会真的放行一次探测（Task 2 规格明确如此）。
+    // 步长必须严格小于 PROBE_INTERVAL_MS / 轮数，否则某一轮会撞上窗口边界、触发一次
+    // 真实（仍被拒绝的）push 尝试，与本用例「连跑多轮全程只跳过」的断言矛盾。
+    // 从常量推导轮数，而不是像 50_000 这样硬编码一个凑出来的步长——
+    // 这样 PROBE_INTERVAL_MS 以后调整时，这条用例不会静默地再次撞上边界。
+    const CYCLE_MS = 60_000; // 与 DEFAULT_INTERVAL=60s 对齐，是真实周期长度
+    const rounds = PROBE_INTERVAL_MS / CYCLE_MS - 1; // 4 轮，构造上保证严格落在窗口内
+    for (let i = 1; i <= rounds; i++) {
       write(kb, `b${i}.md`, "x\n");
-      const r = syncOnce(cfg, { ...at(T0 + i * 50_000), pushGate: gate });
+      const r = syncOnce(cfg, { ...at(T0 + i * CYCLE_MS), pushGate: gate });
       expect(r.pushSkipped).toBe(true);
       expect(r.pushed).toBe(false);
       // 关键：熔断只掐 push，本地提交必须照常发生
@@ -358,6 +360,11 @@ describe("push 无权限熔断", () => {
     const { kb, cfg } = setup();
     const gate = new PushGate();
     syncOnce(cfg, { ...at(T0), pushGate: gate });
+    // 步长刻意保持 60_000（不要为了跟上一条用例「看起来一致」改成别的值）：
+    // 第 5 轮 T0+300_000 恰好等于 PROBE_INTERVAL_MS，即探测窗口到点，PushGate 会真的
+    // 再放行一次探测；该次探测仍被拒绝（denyPush 全程未摘），record() 返回 "unchanged"，
+    // 因此不应追加第二条日志。这是全套测试里唯一覆盖「重复 denied 探测不追加日志」
+    // 这条防回归路径的用例，步长不要改。
     for (let i = 1; i <= 5; i++) {
       write(kb, `b${i}.md`, "x\n");
       syncOnce(cfg, { ...at(T0 + i * 60_000), pushGate: gate });
@@ -395,7 +402,12 @@ describe("push 无权限熔断", () => {
     const r = syncOnce(cfg, { ...at(T0 + 60_000), pushGate: gate });
     expect(r.merged).toBe(true);
     expect(r.pushSkipped).toBe(true);
+    expect(r.pushed).toBe(false);
+    expect(gate.blocked).toBe(true);
     expect(read(kb, "from-team.md")).toBe("team\n");
+    // 本地待推的改动（setup 里写的 a.md）在只读模式的 merge 之后仍要安全存活，
+    // 不能因为熔断跳过 push 就丢在本地或被合并覆盖掉。
+    expect(read(kb, "a.md")).toBe("hello\n");
   });
 
   it("权限恢复后自动继续推送并写一条恢复日志", () => {
@@ -419,5 +431,11 @@ describe("push 无权限熔断", () => {
     const r2 = syncOnce(cfg, at(T0 + 1000));
     expect(r2.pushSkipped).toBe(false);
     expect(r2.pushDenied).toBe(true);
+    // 没有熔断器就没有「翻转」这回事，flip 恒为 "unchanged"；
+    // src/sync-engine.ts 里 `flip === "blocked" || !gate` 的 `|| !gate` 分支
+    // 就是为了在这种情况下仍然把拒绝原因写进日志——这里必须断言到，
+    // 否则删掉 `|| !gate` 全套测试也会照样全绿，等于这个分支零覆盖。
+    const log = fs.readFileSync(logger.path(), "utf8");
+    expect(log).toContain("push 无权限");
   });
 });
