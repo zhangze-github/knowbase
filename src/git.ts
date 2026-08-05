@@ -17,6 +17,9 @@ function nonInteractiveEnv(): NodeJS.ProcessEnv {
       "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new",
     // 避免受用户全局 hooks / pager 干扰
     GIT_PAGER: "cat",
+    // 固定 locale：git 自身的错误文案在中文环境下会被本地化，
+    // 会让 classifyPushFailure 的英文关键词全部失配。
+    LC_ALL: "C",
   };
 }
 
@@ -212,11 +215,95 @@ export function addPath(dir: string, file: string): GitResult {
   return git(["add", "--", file], { cwd: dir });
 }
 
+/** push 失败的语义分类。 */
+export type PushFailure = "denied" | "rejected" | "transient";
+
+/**
+ * 「重试必然同样失败」的关键词：凭证、权限、服务端策略。
+ * 刻意不用裸 "403" / "401"——push 输出里的 delta 计数可能恰好是这些数字。
+ */
+const DENIED_PATTERNS = [
+  "permission denied",
+  "denied to",
+  "access denied",
+  "authentication failed",
+  "could not read username",
+  "could not read password",
+  "terminal prompts disabled",
+  "returned error: 403",
+  "returned error: 401",
+  "forbidden",
+  "unauthorized",
+  "you are not allowed to push",
+  "pre-receive hook declined",
+  "protected branch",
+  "repository not found",
+];
+
+/** 并发竞争导致的 non-fast-forward：下一周期先合并再推即可。 */
+const REJECTED_PATTERNS = [
+  "rejected",
+  "non-fast-forward",
+  "fetch first",
+  "failed to push some refs",
+];
+
+/**
+ * 对 push 的失败输出分类。
+ *
+ * denied 必须先于 rejected 判定：GitLab 拒保护分支时输出同时含
+ * "not allowed to push"（永久失败）与 "[remote rejected]"（看起来像并发竞争），
+ * 顺序反了会把永久失败误当成竞争，退回每周期无限重试。
+ */
+export function classifyPushFailure(output: string): PushFailure {
+  const text = output.toLowerCase();
+  if (DENIED_PATTERNS.some((p) => text.includes(p))) return "denied";
+  if (REJECTED_PATTERNS.some((p) => text.includes(p))) return "rejected";
+  return "transient";
+}
+
+/** 从 git 输出里挑一行最能说明问题的作为原因，优先服务端 remote: 原文。 */
+export function pushFailureReason(r: GitResult): string {
+  const lines = (r.stderr + "\n" + r.stdout)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+  const remote = lines.find((l) => l.toLowerCase().startsWith("remote:"));
+  if (remote) return remote.replace(/^remote:\s*/i, "");
+  const fatal = lines.find((l) => /^(fatal|error):/i.test(l));
+  return fatal ?? lines[0] ?? "未知原因";
+}
+
 export interface PushOutcome {
   ok: boolean;
   /** 被拒（并发竞争 / non-fast-forward），下一周期先合并再推。 */
   rejected: boolean;
+  /** 凭证 / 权限 / 服务端策略拒绝——重试必然同样失败，交由熔断器处理。 */
+  denied: boolean;
+  failure?: PushFailure;
   result: GitResult;
+}
+
+function runPush(
+  dir: string,
+  remote: string,
+  branch: string,
+  timeoutMs: number,
+  dryRun: boolean
+): PushOutcome {
+  const args = dryRun
+    ? ["push", "--dry-run", remote, `HEAD:${branch}`]
+    : ["push", remote, `HEAD:${branch}`];
+  const r = git(args, { cwd: dir, timeoutMs });
+  if (r.code === 0) return { ok: true, rejected: false, denied: false, result: r };
+  const failure = classifyPushFailure(r.stderr + r.stdout);
+  return {
+    ok: false,
+    rejected: failure === "rejected",
+    denied: failure === "denied",
+    failure,
+    result: r,
+  };
 }
 
 export function push(
@@ -225,15 +312,20 @@ export function push(
   branch: string,
   timeoutMs = 60000
 ): PushOutcome {
-  const r = git(["push", remote, `HEAD:${branch}`], { cwd: dir, timeoutMs });
-  if (r.code === 0) return { ok: true, rejected: false, result: r };
-  const text = (r.stderr + r.stdout).toLowerCase();
-  const rejected =
-    text.includes("rejected") ||
-    text.includes("non-fast-forward") ||
-    text.includes("fetch first") ||
-    text.includes("failed to push some refs");
-  return { ok: false, rejected, result: r };
+  return runPush(dir, remote, branch, timeoutMs, false);
+}
+
+/**
+ * 只做写权限探测：不传输对象，但仍会向服务端发起 receive-pack 协商，
+ * 鉴权在该阶段发生，因此即使本地无新提交也能真实反映写权限。
+ */
+export function pushDryRun(
+  dir: string,
+  remote: string,
+  branch: string,
+  timeoutMs = 30000
+): PushOutcome {
+  return runPush(dir, remote, branch, timeoutMs, true);
 }
 
 /** 是否配置了 origin 远端。 */
