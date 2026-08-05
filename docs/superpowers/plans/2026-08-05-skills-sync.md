@@ -240,6 +240,7 @@ git commit -m "feat(skills): 目录名前缀与 SKILL.md name 字段改写"
   - `export interface SkillSource { name: string; dir: string; target: string; hash: string }`
   - `export type SkillAction = "created" | "updated" | "unchanged" | "foreign" | "removed" | "invalid" | "failed"`
   - `export interface SkillChange { name: string; target: string; action: SkillAction; reason?: string }`
+  - `export function dedupeByTargetCase(sources: SkillSource[]): { kept: SkillSource[]; dropped: Array<{ name: string; winner: string }> }`
   - `export function readSkillSources(kbDir: string): { sources: SkillSource[]; invalid: SkillChange[] }`
 
 - [ ] **Step 1: 写失败的测试**
@@ -370,18 +371,40 @@ describe("readSkillSources", () => {
     expect(r.invalid.map((c) => c.name)).toEqual([".hidden"]);
   });
 
-  it("仅大小写不同的重名 → 取排序第一个，其余 invalid", () => {
-    // 大小写不敏感的文件系统上无法同时落盘 Foo 与 foo，因此直接测纯函数
-    // 层面的去重：用 aFoo / Afoo 这两个能共存、且 target 小写相同的名字。
-    const kb = tmpDir("skills-src4");
-    seedSkill(kb, "Afoo");
-    seedSkill(kb, "afoo");
-    const r = readSkillSources(kb);
-    expect(r.sources).toHaveLength(1);
-    expect(r.sources[0].name).toBe("Afoo");
-    expect(r.invalid).toHaveLength(1);
-    expect(r.invalid[0].name).toBe("afoo");
-    expect(r.invalid[0].reason).toContain("大小写");
+});
+
+describe("dedupeByTargetCase", () => {
+  // 大小写去重**只能**这样测：「仅大小写不同的两个目录并存」在大小写不敏感的
+  // 文件系统（macOS 默认 APFS）上无法落盘构造——不敏感恰恰意味着 Afoo 与 afoo
+  // 就是同一个目录名，所以任何走 readSkillSources 的写法都测不到这条路径。
+  // 与 src/agent-config.ts 的 pickIndexName 同一处理方式、同一理由。
+  const s = (name: string): SkillSource => ({
+    name,
+    dir: `/kb/skills/${name}`,
+    target: prefixedName(name)!,
+    hash: "h",
+  });
+
+  it("仅大小写不同 → 取排序第一个，其余 dropped", () => {
+    const r = dedupeByTargetCase([s("afoo"), s("Afoo")]);
+    expect(r.kept.map((k) => k.name)).toEqual(["Afoo"]);
+    expect(r.dropped).toEqual([{ name: "afoo", winner: "Afoo" }]);
+  });
+
+  it("结果与输入顺序无关", () => {
+    expect(dedupeByTargetCase([s("Afoo"), s("afoo")]).kept.map((k) => k.name)).toEqual(["Afoo"]);
+  });
+
+  it("大小写不冲突时全部保留并按名字排序", () => {
+    const r = dedupeByTargetCase([s("b"), s("a")]);
+    expect(r.kept.map((k) => k.name)).toEqual(["a", "b"]);
+    expect(r.dropped).toEqual([]);
+  });
+
+  it("三个变体 → 留一个丢两个", () => {
+    const r = dedupeByTargetCase([s("Foo"), s("foo"), s("fOo")]);
+    expect(r.kept.map((k) => k.name)).toEqual(["Foo"]);
+    expect(r.dropped.map((d) => d.name).sort()).toEqual(["fOo", "foo"]);
   });
 });
 ```
@@ -489,6 +512,37 @@ export interface SkillChange {
 }
 
 /**
+ * 仅大小写不同的目标名去重：取排序第一个，其余作为 dropped 返回。
+ *
+ * 抽成接受数组的纯函数，理由与 agent-config.ts 的 pickIndexName 相同：
+ * 「仅大小写不同的两个目录并存」在大小写不敏感的文件系统（macOS 默认 APFS）
+ * 上无法落盘构造，只能这样测。
+ *
+ * 取值必须定死：macOS 不敏感、Linux 敏感，不定死会产生「同一知识库在不同
+ * 成员机器上行为不同」的极难排查问题。内部自己排序，不依赖调用方是否排过序。
+ */
+export function dedupeByTargetCase(sources: SkillSource[]): {
+  kept: SkillSource[];
+  dropped: Array<{ name: string; winner: string }>;
+} {
+  const sorted = [...sources].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const seen = new Map<string, string>();
+  const kept: SkillSource[] = [];
+  const dropped: Array<{ name: string; winner: string }> = [];
+  for (const s of sorted) {
+    const key = s.target.toLowerCase();
+    const winner = seen.get(key);
+    if (winner === undefined) {
+      seen.set(key, s.name);
+      kept.push(s);
+      continue;
+    }
+    dropped.push({ name: s.name, winner });
+  }
+  return { kept, dropped };
+}
+
+/**
  * 扫描 <kbDir>/skills 下的一级子目录，校验并计算哈希。
  * skills/ 不存在时返回空结果、绝不抛错——大多数团队 day one 还没有这个目录。
  */
@@ -541,23 +595,11 @@ export function readSkillSources(kbDir: string): {
     sources.push({ name, dir, target, hash });
   }
 
-  // 仅大小写不同的重名必须定死取值：macOS 大小写不敏感、Linux 敏感，不定死会
-  // 产生「同一知识库在不同成员机器上行为不同」的极难排查问题。entries 已按名字
-  // 排序，因此先到的就是排序第一个。
-  const seen = new Map<string, string>();
-  const deduped: SkillSource[] = [];
-  for (const s of sources) {
-    const key = s.target.toLowerCase();
-    const winner = seen.get(key);
-    if (winner === undefined) {
-      seen.set(key, s.name);
-      deduped.push(s);
-      continue;
-    }
-    bad(s.name, `与 ${winner} 仅大小写不同，已跳过`);
-  }
+  // bad() 会 push 进 invalid，所以这两行必须在其他 invalid 条目收集完之后
+  const { kept, dropped } = dedupeByTargetCase(sources);
+  for (const d of dropped) bad(d.name, `与 ${d.winner} 仅大小写不同，已跳过`);
 
-  return { sources: deduped, invalid };
+  return { sources: kept, invalid };
 }
 ```
 
