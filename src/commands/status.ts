@@ -13,6 +13,7 @@ import {
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
 import { readIndex, INDEX_MAX_BYTES } from "../agent-config.js";
+import { readExistingTargets, readSkillSources, skillsHomeDir } from "../skills-sync.js";
 
 /** 递归扫描冲突副本（跳过 .git / node_modules，限制深度防止巨树卡顿）。 */
 function findConflictCopies(dir: string, depth = 0, acc: string[] = []): string[] {
@@ -167,6 +168,35 @@ export function cmdStatus(): number {
       const kb = (idx.bytes / 1024).toFixed(1);
       const note = idx.truncated ? `，超 ${INDEX_MAX_BYTES / 1024}KB 已截断` : "";
       console.log(`agent 提示词：已注入 ${idx.name}（${kb}KB${note}）`);
+    }
+  }
+
+  // 团队 skills（同样默认静默运行，必须给出可见性）
+  console.log("");
+  if (cfg.skills === false) {
+    console.log("团队 skills：已关闭（init 时用了 --no-skills）");
+  } else {
+    const { sources, invalid } = readSkillSources(cfg.dir);
+    const managed = readExistingTargets(skillsHomeDir()).filter((e) => e.marker);
+    if (sources.length === 0 && managed.length === 0) {
+      // 不计入 anomalies：knowbase 不播种 skills/，「还没有团队 skill」
+      // 是每个团队 day one 的正常状态。
+      console.log("团队 skills：已启用；知识库暂无 skills/ 目录");
+    } else {
+      console.log(`团队 skills：已分发 ${managed.length} 个（org-*），源 ${sources.length} 个`);
+    }
+    for (const c of invalid) {
+      console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
+      anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
+    }
+    const foreign = sources.filter(
+      (s) => !managed.some((m) => m.target === s.target) && fs.existsSync(path.join(skillsHomeDir(), s.target))
+    );
+    for (const s of foreign) {
+      console.log(`  ⚠ 跳过 ${s.target}：同名目录不是 knowbase 托管的，未覆盖`);
+      anomalies.push(
+        `团队 skill ${s.name} 未分发：~/.claude/skills/${s.target} 是你自己的目录，未覆盖；改名后即可收到团队版`
+      );
     }
   }
 

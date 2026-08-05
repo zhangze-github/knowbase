@@ -308,6 +308,56 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(knowbase(["status"]).out).toContain("agent 提示词：已关闭");
   });
 
+  it("status 报告团队 skills：暂无 / 已分发 / 已关闭", () => {
+    const kb = path.join(root, "kb");
+
+    // 知识库没有 skills/ 目录
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(knowbase(["status"]).out).toContain("知识库暂无 skills/ 目录");
+
+    // 关闭
+    expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
+    expect(knowbase(["status"]).out).toContain("--no-skills");
+  });
+
+  it("status 统计已分发的团队 skills 数量", () => {
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "status-count");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(knowbase(["status"]).out).toContain("已分发 1 个");
+  });
+
+  it("同名目录非托管时 status 提示未覆盖、计入需要注意并非零退出", () => {
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "status-foreign");
+    // 先手工占位 org-demo（无 .knowbase.json），模拟成员自己写过同名 skill
+    const own = path.join(home, ".claude", "skills", "org-demo");
+    fs.mkdirSync(own, { recursive: true });
+    fs.writeFileSync(path.join(own, "SKILL.md"), "---\nname: org-demo\n---\n我自己写的\n");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const s = knowbase(["status"]);
+    expect(s.out).toContain("未覆盖");
+    expect(s.code).toBe(1);
+    // 内容必须原样保留
+    expect(fs.readFileSync(path.join(own, "SKILL.md"), "utf8")).toContain("我自己写的");
+  });
+
+  it("uninstall 移除托管 skills 副本，保留用户自己的 skill", () => {
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "uninst-skill");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
+
+    const mine = path.join(home, ".claude", "skills", "my-own");
+    fs.mkdirSync(mine, { recursive: true });
+    fs.writeFileSync(path.join(mine, "SKILL.md"), "---\nname: my-own\n---\n私人\n");
+
+    expect(knowbase(["uninstall"]).code).toBe(0);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(false);
+    expect(fs.readFileSync(path.join(mine, "SKILL.md"), "utf8")).toContain("私人");
+  });
+
   it("零字节 index.md → 区块回退文案与 status 口径一致", () => {
     const kb = path.join(root, "kb");
     const claude = path.join(home, ".claude", "CLAUDE.md");

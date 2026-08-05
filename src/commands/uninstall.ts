@@ -9,6 +9,7 @@ import {
 } from "../config.js";
 import { getAutostart } from "../platform/index.js";
 import { uninstallAgentConfig } from "../agent-config.js";
+import { uninstallSkills } from "../skills-sync.js";
 
 /** `knowbase uninstall`：注销自启、停止守护进程、保留本地文件夹。 */
 export function cmdUninstall(): number {
@@ -45,6 +46,21 @@ export function cmdUninstall(): number {
     }
   } catch (e) {
     console.warn(`⚠ 移除 agent 提示词区块时出错：${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 移除分发到 ~/.claude/skills 的团队 skills 副本（无托管标记的目录一律不碰）
+  try {
+    const removed = uninstallSkills().filter((r) => r.removed);
+    if (removed.length > 0) {
+      console.log(
+        `• 已从 ~/.claude/skills 移除团队 skills ${removed.length} 个：` +
+          removed.map((r) => r.target).join(", ")
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `⚠ 移除团队 skills 时出错：${e instanceof Error ? e.message : String(e)}`
+    );
   }
 
   new Logger().log("uninstall：已注销自启并停止守护进程");
