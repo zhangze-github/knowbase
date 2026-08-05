@@ -258,7 +258,8 @@ describe("readSkillSources", () => {
 
   it("坏源的 target 进入 protectedTargets，目录名非法的不进", () => {
     // 目录名非法算不出 target，也就不可能有对应副本，进保护集合毫无意义；
-    // 目录名合法的必须进——否则反向扫描会把已装好的副本当孤儿删掉。
+    // SKILL.md 存在但内容坏掉（frontmatter 缺失）的必须进——否则反向扫描会
+    // 把已装好的副本当孤儿删掉。protectedTargets 的收窄范围见下面几条测试。
     const kb = tmpDir("skills-src6");
     write(kb, "skills/broken/SKILL.md", "# 没有 frontmatter\n");
     write(kb, "skills/.hidden/SKILL.md", "---\nname: x\ndescription: d\n---\n");
@@ -266,6 +267,41 @@ describe("readSkillSources", () => {
     const r = readSkillSources(kb);
     expect(r.sources).toEqual([]);
     expect(r.protectedTargets).toEqual(["org-broken"]);
+  });
+
+  it("SKILL.md 内容校验失败（frontmatter 坏掉 / 缺 description）的 target 仍被保护", () => {
+    // 回归：确认收窄 protectedTargets 时没有连「该保护的」也一起去掉。
+    // 这两类的共同点是「SKILL.md 在、但内容坏了，意图仍在」——源修好后哈希
+    // 自然对不上，会走 updated 自愈，保留旧副本严格优于删除。
+    const kb = tmpDir("skills-src10");
+    write(kb, "skills/badfm/SKILL.md", "# 没有 frontmatter\n");
+    write(kb, "skills/nodesc/SKILL.md", "---\nname: nodesc\n---\n\n步骤\n");
+
+    const r = readSkillSources(kb);
+    // protectedTargets 现在会被冻结（见实现注释），排序前先拷贝一份，
+    // 否则 Array.prototype.sort 原地修改冻结数组会直接抛错。
+    expect([...r.protectedTargets].sort()).toEqual(["org-badfm", "org-nodesc"]);
+  });
+
+  // 「碰撞输家的 target 不被保护」这条不在这里用真实目录测：Afoo 与 afoo 只差
+  // 大小写，在大小写不敏感的文件系统（macOS 默认 APFS）上第二个 mkdir 会直接
+  // ENOENT/EEXIST——两者本来就不能同时作为两个真实目录项存在于磁盘上，不是
+  // 测试写法的问题，是这个场景本身的定义（「仅大小写不同」）决定的。这条改由
+  // planSkills 的纯函数测试覆盖（见下面 describe("planSkills") 里
+  // 「碰撞输家未被保护时，其旧副本被判 removed」），并且 readSkillSources 里
+  // 「dropped 结果不经过 protectedTargets」这一步已经被上面 Object.freeze 的
+  // 顺序保证钉死在实现层面，不需要也没法在这一层用真实文件系统场景验证到。
+
+  it("缺少 SKILL.md 的目标不被保护（目录被清空是「不再是 skill」的信号，允许清理）", () => {
+    // 设计文档 §5：不含 SKILL.md 的子目录忽略（可能是误放的素材目录）。
+    // 这与「SKILL.md 在但内容坏了」不是一类——SKILL.md 被删是意图变了，
+    // 不是当前状态坏了，已装好的旧副本应当能被正常清理，不该永久保留。
+    const kb = tmpDir("skills-src12");
+    write(kb, "skills/materials/README.md", "素材\n");
+
+    const r = readSkillSources(kb);
+    expect(r.invalid.map((c) => c.name)).toEqual(["materials"]);
+    expect(r.protectedTargets).not.toContain("org-materials");
   });
 });
 
@@ -407,6 +443,31 @@ describe("planSkills", () => {
     ]);
     // 源还在知识库里、只是本轮校验没过（frontmatter 被弄坏之类）→ 一个字都不动
     expect(planSkills([], existing, ["org-a"])).toEqual([]);
+  });
+
+  it("碰撞输家未被保护时，其旧副本被判 removed（大小写碰撞产生的僵尸会被清理）", () => {
+    // 场景还原：Linux（大小写敏感）上先有 skills/afoo，分发成 org-afoo；
+    // 之后有人加了 skills/Afoo，排序上赢走了 org-Afoo/org-afoo 这个碰撞——
+    // afoo 进 invalid。readSkillSources 现在的实现里，dedupeByTargetCase 的
+    // dropped 结果只会追加进 invalid、不会碰 protectedTargets（顺序上
+    // protectedTargets 在 dedupe 跑之前就已经算完并 Object.freeze，见该函数
+    // 注释），所以 org-afoo 不会被保护——这里 protectedTargets 传空数组模拟
+    // 这一结果，验证 planSkills 会把 org-afoo 判成 removed，而不是让它无人
+    // 认领地永久留在磁盘上。
+    //
+    // 大小写碰撞（Afoo 与 afoo 只差大小写）在大小写不敏感的文件系统（macOS
+    // 默认 APFS）上无法用两个真实目录落盘构造——两者本来就不能同时作为两个
+    // 目录项存在，因此这个场景只能在 planSkills 这一纯函数层手工构造输入来
+    // 覆盖，这也是 readSkillSources 层没有对应测试的原因。
+    const p = planSkills(
+      [{ name: "Afoo", dir: "/kb/skills/Afoo", target: "org-Afoo", hash: "h1" }],
+      [{ target: "org-afoo", marker: mk("afoo", "h0", "c0"), copyHash: "c0" }],
+      []
+    );
+    expect(p).toEqual([
+      { name: "Afoo", target: "org-Afoo", action: "created" },
+      { name: "afoo", target: "org-afoo", action: "removed" },
+    ]);
   });
 
   it("无标记且不在源列表中 → 完全不出现在计划里（用户自己的 skill）", () => {

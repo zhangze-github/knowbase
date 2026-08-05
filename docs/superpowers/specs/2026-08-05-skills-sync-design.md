@@ -103,7 +103,17 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 
 **但校验没通过的源必须先从这次反向扫描里排除**。`readSkillSources` 把 frontmatter 坏掉的源归入 `invalid` 并从 `sources` 中剔除，而反向扫描只认「不在 `sources` 里」——不排除的话，一个成员把 `skills/deploy/SKILL.md` 弄坏（本仓库对 `*.md` 开了 `merge=union`，`skills/*/SKILL.md` 也匹配，并发编辑同一个 skill 产出重复行 frontmatter 是可预期的），全团队机器上已经装好的 `org-deploy` 会被判成孤儿删掉：一个格式错误让所有人丢掉一个能用的 skill。**「保留上一份好副本」严格优于「删掉」**：源不在 `sources` 里就不会被更新，副本原样躺着；源修好后哈希与 `marker.hash` 不同 → 自然判 `update`，自愈。
 
-实现上由 `readSkillSources` 额外返回 `protectedTargets`（`invalid` 条目中目录名合法、算得出 target 的那些；目录名不合法的算不出 target，也就不可能有对应副本），`syncSkills` 把它作为第三个参数传给 `planSkills`，反向扫描时跳过。`planSkills` 仍是零 fs 访问的纯函数。
+实现上由 `readSkillSources` 额外返回 `protectedTargets`，`syncSkills` 把它作为第三个参数传给 `planSkills`，反向扫描时跳过。`planSkills` 仍是零 fs 访问的纯函数。
+
+**但这个集合收得很窄，不是「所有 invalid 都保护」**：只收 `invalid` 条目里「SKILL.md 存在、但内容校验没过」这一类——frontmatter 坏了 / 缺 `name` / 缺 `description` / 读取失败（IO 错误）。这类的共同点是「当前状态坏了、意图仍在」，源修好后自然重装，保护严格优于删除。
+
+其余进 `invalid` 的情形都**不**进这个集合，即使算得出 target：
+
+- **目录名不合法**：算不出 target，本来就不可能有对应副本。
+- **缺少 `SKILL.md`**：§5 明确「不含 `SKILL.md` 的子目录忽略（可能是误放的素材目录）」——`SKILL.md` 被删是「这不再是 skill」的真实信号，不是「内容坏了」，应当让已装好的副本被正常清理。
+- **被 `dedupeByTargetCase` 丢弃的碰撞输家**：输家的 target 与胜出者不同（如 `org-afoo` 对 `org-Afoo`），胜出者的分发管不到输家的副本。若保护它，在大小写敏感的文件系统（Linux）上会产生一份永远不会被更新（源不在 `sources` 里）也永远不会被清理（被保护）的僵尸目录，被 Claude Code 永久加载一份冻结的旧内容——比直接删掉更糟。在大小写不敏感的 APFS 上这两个目标其实是同一个目录，问题不显现，但不能因此把这类也塞进保护集合。
+
+**这个不变式靠计算顺序钉死，不靠调用点记得传哪个值**：`readSkillSources` 的主循环（目录名校验 → SKILL.md 存在性 → frontmatter/name/description → hash）结束、`protectedTargets` 算完之后就地 `Object.freeze`；`dedupeByTargetCase` 的 `dropped` 结果之后才计算，且直接追加进 `invalid`，代码里没有一条路径能碰到 `protectedTargets`——冻结之后再碰它会在运行时直接抛错，而不是像上一轮那样，仅仅因为一个调用点忘了把 target 换成 null 就静默重新引入「碰撞输家被误保护」的 bug。**这个顺序是有意的：不要把两段循环合并，也不要把 dedupe 挪到 `protectedTargets` 算完之前。**
 
 `orphan` 的删除**必须先于** `create` / `update` 执行。只改大小写的重命名（`skills/foo` → `skills/Foo`）得到的计划是 `[create org-Foo, orphan org-foo]`，而在大小写不敏感的文件系统（macOS 默认 APFS）上这两个名字是同一个目录：先装后删会把刚装好的副本删掉，该 skill 在磁盘上消失一整个周期。其余场景两种顺序等价（同一个 target 不会同时出现在两类动作里）。
 

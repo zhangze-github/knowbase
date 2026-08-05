@@ -258,15 +258,36 @@ function frontmatterField(md: string, key: string): string | null {
  * 扫描 <kbDir>/skills 下的一级子目录，校验并计算哈希。
  * skills/ 不存在时返回空结果、绝不抛错——大多数团队 day one 还没有这个目录。
  *
- * protectedTargets：invalid 条目中「目录名合法、算得出托管副本名」的那批 target。
+ * protectedTargets：invalid 条目里**「SKILL.md 存在、但内容校验没过」**这一类的
+ * target——frontmatter 坏了 / 缺 name / 缺 description / 读取失败（IO 错误）。
  * 交给 planSkills 在反向扫描时跳过，语义是**「保留上一份好副本」严格优于「删掉」**：
  * 一个成员把 skills/deploy/SKILL.md 的 frontmatter 弄坏（本仓库对 *.md 开了
  * merge=union，并发编辑同一个 skill 产出重复行 frontmatter 是可预期的），
  * deploy 会落进 invalid、从 sources 里消失，若不保护，反向扫描会把全团队机器上
  * 已经装好的 org-deploy 判成孤儿删掉——一个格式错误让所有人丢掉一个能用的 skill。
  * 保护之后副本原样躺着（源不在 sources 里也就不会被更新），源修好后哈希与
- * marker.hash 不同、自然判 updated，自愈。
- * 目录名不合法的算不出 target，也就不可能有对应副本，无需保护。
+ * marker.hash 不同、自然判 updated，自愈。这类的共同点是「当前状态坏了、意图
+ * 仍在」：目录还在、SKILL.md 还在，只是内容有问题，修好即自愈。
+ *
+ * **不保护的两类**（即使算得出 target），理由不同、都不是「当前状态坏了」：
+ * - **缺少 SKILL.md**：设计文档 §5 明确「不含 SKILL.md 的子目录忽略（可能是
+ *   误放的素材目录）」。SKILL.md 被删是「这不再是 skill」的真实信号，应当让
+ *   已装好的副本被正常清理，而不是永久留着。
+ * - **被 dedupeByTargetCase 丢弃的碰撞输家**：输家的 target 与胜出者不同
+ *   （如 org-afoo 对 org-Afoo），胜出者的分发管不到输家的副本。若保护它，
+ *   在大小写敏感的文件系统（Linux）上会产生一份永远不会被更新（源不在
+ *   sources 里）也永远不会被清理（被保护）的僵尸目录——比直接删掉更糟。
+ *   在大小写不敏感的 APFS 上这两个目标其实是同一个目录，问题不显现，但
+ *   绝不能因此把这类也塞进保护集合。
+ *
+ * **实现上靠计算顺序把这个不变式钉死，不靠调用点记得传 null**：下面主循环
+ * 结束、`protectedTargets` 算完并 `Object.freeze` 之后才跑 `dedupeByTargetCase`；
+ * dropped 条目直接 push 进 `invalid`，代码里根本没有一条路径能碰到
+ * `protectedTargets`——就算之后有人在 dedupe 那段手滑加一行
+ * `protectedTargets.push(...)`，frozen 数组会在运行时直接抛错，而不是静默
+ * 引入原来那个 bug（碰撞输家的 target 被误保护，在大小写敏感文件系统上产生
+ * 永远不会更新也不会清理的僵尸副本）。**这个顺序是有意的，不要把两段循环
+ * 合并，也不要把 dedupe 挪到 protectedTargets 计算完之前。**
  */
 export function readSkillSources(kbDir: string): {
   sources: SkillSource[];
@@ -284,7 +305,13 @@ export function readSkillSources(kbDir: string): {
   const sources: SkillSource[] = [];
   const invalid: SkillChange[] = [];
   const protectedTargets: string[] = [];
-  /** target 传 null 表示目录名不合法（不可能有对应副本，不进保护集合）。 */
+  /**
+   * 本轮校验失败即调用。target 传 null：目录名不合法，算不出 target，不可能
+   * 有对应副本。target 传具体值：SKILL.md 在但内容坏了，或读取失败——计入
+   * protectedTargets。**这个函数只在下面的主循环里用**——dedupeByTargetCase
+   * 丢弃的碰撞输家走另一条路径（见主循环之后），不经过它、也就没有机会把
+   * target 写进 protectedTargets，见上面的注释。
+   */
   const bad = (name: string, reason: string, target: string | null): void => {
     invalid.push({ name, target: "", action: "invalid", reason });
     if (target) protectedTargets.push(target);
@@ -304,7 +331,10 @@ export function readSkillSources(kbDir: string): {
     try {
       md = fs.readFileSync(mdPath, "utf8");
     } catch {
-      bad(name, "缺少 SKILL.md", target);
+      // 传 null 不保护：SKILL.md 缺失是「这不再是 skill」的信号（可能是误放的
+      // 素材目录，见设计文档 §5），不是「内容坏了、意图仍在」，应当让已装好的
+      // 副本被正常清理，而不是让它变成永久留着的僵尸。
+      bad(name, "缺少 SKILL.md", null);
       continue;
     }
     if (rewriteSkillName(md, target) === null) {
@@ -329,11 +359,21 @@ export function readSkillSources(kbDir: string): {
     sources.push({ name, dir, target, hash });
   }
 
+  // protectedTargets 到此已经算完、定案。冻结它：往下 dedupeByTargetCase 的
+  // dropped 结果只会 push 进 invalid，代码里没有任何一条路径会碰 protectedTargets；
+  // 就算日后有人在下面手滑加一行 protectedTargets.push(...)，也会在运行时
+  // 直接抛错，而不是静默重新引入「碰撞输家被误保护」这个 bug。不要把这两段
+  // 循环合并，也不要把 dedupe 挪到这一行之前——顺序本身就是这个不变式的实现。
+  Object.freeze(protectedTargets);
+
   const { kept, dropped } = dedupeByTargetCase(sources);
   for (const d of dropped) {
-    // dedupeByTargetCase 的输入全部来自上面 prefixedName 非 null 的分支，
-    // 这里再算一次必然拿到同一个值（避免为了带出 target 改动它的返回形状）。
-    bad(d.name, collisionReason(d.name, d.winner), prefixedName(d.name));
+    invalid.push({
+      name: d.name,
+      target: "",
+      action: "invalid",
+      reason: collisionReason(d.name, d.winner),
+    });
   }
   return { sources: kept, invalid, protectedTargets };
 }
