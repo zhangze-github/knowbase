@@ -330,13 +330,17 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const state: DaemonState = { pid: process.pid, startedAt };
   writeDaemonState(state);
 
+  // 熔断器长驻于守护进程内存：跨周期保持状态，随进程退出而清空。
+  const gate = deps.pushGate ?? new PushGate();
+  const cycleDeps: SyncDeps = { ...deps, pushGate: gate };
+
   // syncOnce 是同步阻塞的，事件循环保证不会重入。
   // 不设「同步后屏蔽窗」：屏蔽会丢掉紧跟同步之后的用户编辑（只能干等下轮轮询）。
   // 同步自身写盘（merge 落盘/冲突副本）最多引发一次空跑同步——空跑无改动、
   // 只动 .git（已过滤），不会形成风暴，天然收敛。
   const runCycle = (): void => {
     try {
-      const r = syncOnce(cfg, deps);
+      const r = syncOnce(cfg, cycleDeps);
       state.lastCycleAt = new Date().toISOString();
       state.paused = r.paused;
       state.lastError = r.error;
@@ -346,6 +350,7 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
           state.lastSyncOkAt = state.lastCycleAt;
         }
       }
+      state.pushBlocked = gate.snapshot();
       writeDaemonState(state);
     } catch (e) {
       state.lastError = e instanceof Error ? e.message : String(e);

@@ -306,3 +306,39 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(st.out).toContain("尚未接入");
   });
 });
+
+describe("status 展示 push 熔断", () => {
+  it("pushBlocked 存在时给出只读模式提示并以非零退出", () => {
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
+
+    // status 只读状态文件，不需要真跑守护进程；直接构造一份。
+    // 测试里 KNOWBASE_SKIP_AUTOSTART=1，init 不会产生 daemon.state.json，所以是新建。
+    // pid 用当前进程（确实存活）→ status 判定「运行中」，避免多出一条无关 anomaly，
+    // 让退出码 1 只由 pushBlocked 贡献。
+    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
+    fs.mkdirSync(path.dirname(statePath), { recursive: true });
+    fs.writeFileSync(
+      statePath,
+      JSON.stringify(
+        {
+          pid: process.pid,
+          startedAt: new Date(Date.UTC(2026, 7, 5, 11, 0, 0)).toISOString(),
+          pushBlocked: {
+            since: new Date(Date.UTC(2026, 7, 5, 12, 0, 0)).toISOString(),
+            reason: "GitLab: You are not allowed to push code to this project.",
+            nextProbeAt: new Date(Date.UTC(2026, 7, 5, 12, 5, 0)).toISOString(),
+          },
+        },
+        null,
+        2
+      )
+    );
+
+    const r = knowbase(["status"]);
+    expect(r.out).toContain("无 push 权限");
+    expect(r.out).toContain("You are not allowed to push code to this project.");
+    expect(r.out).toContain("无需手动操作");
+    expect(r.code).toBe(1);
+  });
+});

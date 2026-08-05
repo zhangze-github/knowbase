@@ -116,6 +116,22 @@ export function cmdStatus(): number {
   console.log(`本地未提交改动：${uncommitted} 个文件`);
   console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
 
+  // push 熔断（无写权限）——必须醒目：用户看到的「本地领先 N 个提交」
+  // 在这种状态下意味着这些提交永远推不出去。
+  if (state?.pushBlocked) {
+    const pb = state.pushBlocked;
+    console.log("");
+    console.log(`⚠ 无 push 权限：本地 ${ahead} 个提交只在本机，未同步给团队。`);
+    console.log(`  原因：${pb.reason}`);
+    console.log(
+      `  下次自动重试：${new Date(pb.nextProbeAt).toLocaleString()}。` +
+        `补上权限后会自动恢复，无需手动操作。`
+    );
+    anomalies.push(
+      `无 push 权限，${ahead} 个提交未推送给团队——请联系仓库管理员补上写权限，之后自动恢复。`
+    );
+  }
+
   // agent 提示词索引（这个机制默认静默运行，必须给出可见性）
   console.log("");
   if (cfg.agentConfig === false) {
