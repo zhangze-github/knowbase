@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeOrigin, g } from "./helpers.js";
+import { tmpDir, makeOrigin, makeBareOrigin, g } from "./helpers.js";
 
 const CLI = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -53,6 +53,10 @@ function resolveRealGit(): string {
  * GitHub/GitLab 那种「协商之前先鉴权」的中间层，导致钩子永远不会被触发——
  * 模拟不出「--dry-run 也会撞上权限拒绝」这个真实远端才有的行为。用 shim
  * 直接在更外层伪造服务端的拒绝响应，就不依赖本地 bare 仓库有没有鉴权层了。
+ *
+ * 拦截条件遍历整个 "$@" 找 `--dry-run`，不依赖它出现在固定的第几个位置——
+ * 真实（非 dry-run）push 永远不会带这个 flag，不会被误伤；这样即使
+ * src/git.ts 里 pushDryRun 调整了参数顺序，shim 也不会静默失配。
  */
 function makeDenyDryRunShim(dir: string): string {
   fs.mkdirSync(dir, { recursive: true });
@@ -61,11 +65,13 @@ function makeDenyDryRunShim(dir: string): string {
   fs.writeFileSync(
     shim,
     `#!/bin/sh
-if [ "$1" = "push" ] && [ "$2" = "--dry-run" ]; then
-  echo "remote: You are not allowed to push code to this project." >&2
-  echo "fatal: unable to access 'origin': The requested URL returned error: 403" >&2
-  exit 1
-fi
+for arg in "$@"; do
+  if [ "$arg" = "--dry-run" ]; then
+    echo "remote: You are not allowed to push code to this project." >&2
+    echo "fatal: unable to access 'origin': The requested URL returned error: 403" >&2
+    exit 1
+  fi
+done
 exec "${realGit}" "$@"
 `
   );
@@ -391,7 +397,6 @@ describe("init 写权限预检", () => {
     expect(r.code).toBe(0); // 不阻断
     expect(r.out).toContain("只读模式");
     expect(r.out).toContain("无需重新 init");
-    expect(r.out).not.toContain("守护进程会自动重试");
     // 配置照常写入，接入流程走完
     expect(fs.existsSync(path.join(home, ".config", "knowbase", "config.json"))).toBe(true);
   });
@@ -401,5 +406,27 @@ describe("init 写权限预检", () => {
     const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
     expect(r.code).toBe(0);
     expect(r.out).not.toContain("只读模式");
+  });
+
+  it("无权限且需种入规则时：种规则分支走「暂不推送」，不出现旧的重试文案", () => {
+    // makeOrigin 预置的远端已经带 union / 忽略规则，ensureLine 恒为 false，
+    // 走不到「种入规则」那段——用 makeBareOrigin 搭一个不含规则文件（但已有
+    // 提交，满足 headBorn 守卫）的远端，让 seeded=true，才能覆盖这条分支。
+    const kb = path.join(root, "kb");
+    const bareNoRules = makeBareOrigin(root);
+    const shimDir = makeDenyDryRunShim(path.join(root, "git-shim"));
+    const r = knowbase(["init", bareNoRules, "--dir", kb, "--no-agent-config"], {
+      PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("暂不推送");
+    // 只读模式下种规则那段不该再走旧的「守护进程会自动重试」文案
+    // （只读模式的分支现在有专门的提示，见上面的 toContain("暂不推送")）。
+    expect(r.out).not.toContain("守护进程会自动重试");
+    // 注：init.ts 里 p.denied 为真的那条警告分支（readOnly=false，但真实 push
+    // 被拒）当前测试基础设施覆盖不到——要触发它需要「写权限预检（探测分支/
+    // dry-run）判定为有权限，但随后真实 push 却被拒」这种权限中途变化的场景，
+    // git shim 只能模拟固定的 --dry-run 拒绝，无法模拟这种时序竞争，不为此
+    // 硬造场景。
   });
 });

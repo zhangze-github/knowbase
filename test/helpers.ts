@@ -51,6 +51,27 @@ export function makeOrigin(root: string): string {
   return bare;
 }
 
+/**
+ * 搭建：一个 bare 远端 + 一个已推送初始提交，但**不含** union / 忽略规则。
+ * 用于测试 init 里「seeded=true」的分支（`makeOrigin` 已经预置了规则文件，
+ * 会让 `ensureLine` 恒返回 false，走不到「种入规则」那段逻辑）。
+ * 仍然要有至少一个提交——init 对 HEAD 未诞生的空仓库有 `headBorn` 守卫，
+ * 会跳过写权限预检，用空 bare 测不出预检相关的分支。
+ */
+export function makeBareOrigin(root: string): string {
+  const bare = path.join(root, "origin-bare.git");
+  g(root, "init", "--bare", "-b", "main", bare);
+
+  const seed = path.join(root, "seed-bare");
+  g(root, "clone", bare, seed);
+  setIdentity(seed);
+  fs.writeFileSync(path.join(seed, "README.md"), "# KB\n");
+  g(seed, "add", "-A");
+  g(seed, "commit", "-m", "init");
+  g(seed, "push", "origin", "HEAD:main");
+  return bare;
+}
+
 export function cloneWorkdir(bare: string, dir: string): void {
   const parent = path.dirname(dir);
   g(parent, "clone", bare, dir);
