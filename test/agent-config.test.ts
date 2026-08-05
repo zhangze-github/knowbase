@@ -218,6 +218,14 @@ describe("区块内嵌索引", () => {
     expect(b).toContain("**导航**");
   });
 
+  it("区块告诉 agent 可执行流程该沉淀到 skills/", () => {
+    // 不告诉 agent 这个位置存在，它永远只会往 md 里写散文，不会产出 skill
+    const b = buildBlock("/kb");
+    expect(b).toContain("skills/");
+    expect(b).toContain("SKILL.md");
+    expect(b).toContain("org-");
+  });
+
   it("索引含标记字样时 sync→strip 往返不吞用户内容", () => {
     fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n区块以 KNOWBASE:END 收尾\n");
     fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });

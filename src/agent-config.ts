@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -145,6 +146,8 @@ ${index}`
 **写**：只写对其他成员有复用价值的组织级知识；拿不准先询问用户，不要擅自写入。
 - ✅ 业务规则与背景、技术决策及其原因、公共环境/服务配置、通用踩坑与解决方案、跨项目约定。
 - ❌ 个人偏好与习惯、个人待办/日程/草稿、仅与本机或当前个人任务相关的内容、个人私人信息——放本机个人配置或个人笔记，不进知识库。
+
+**沉淀可执行流程**：知识库不只放散文。把「怎么做某件事」的步骤沉淀成 skill —— 写到 \`${dir}/${SKILLS_SUBDIR}/<name>/SKILL.md\`（需含 \`name\` / \`description\` 的 YAML frontmatter），knowbase 会自动分发到全团队每个人的 Claude Code。本机以 \`${ORG_PREFIX}<name>\` 出现；skill 之间互相引用时用带前缀的全名。
 
 **操作**：直接读写 Markdown，保存即同步，无需 git add/commit/push。大范围改动前 \`knowbase pause\`，完成后 \`knowbase resume\`。
 

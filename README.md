@@ -111,6 +111,23 @@ knowbase status
 - **可逆**：`knowbase uninstall` 会精确移除该区块，并保留你的其他内容。
 - 不想自动写入：`init` 时加 `--no-agent-config`。
 
+## 团队 skill 分发（自动）
+
+知识库不只沉淀散文——写在 `<知识库目录>/skills/<name>/SKILL.md`（需含 `name` / `description` 的 YAML frontmatter）的 Claude Code skill，会被自动分发到团队每个成员本机的 `~/.claude/skills/org-<name>/`。守护进程每个同步周期检测一次：源变了就更新，删了就撤下，新增就装上。写入区块的准则里也会提示 agent 把「怎么做某件事」的可执行流程沉淀到这里，而不是只写散文（见上一节的托管区块文案）。
+
+```
+知识库                              本机（每个成员）
+skills/deploy/SKILL.md      ──►    ~/.claude/skills/org-deploy/SKILL.md   (name: org-deploy)
+```
+
+几条容易搞混的地方需要明确：
+
+- **单向下发，托管副本是只读产物**：在 `~/.claude/skills/org-*/` 里手改**不会**回写知识库，下个同步周期会被静默覆盖（实现上是给每个副本单独算一份内容哈希，一旦跟落盘时的哈希对不上就判定「本机被动过」，触发重装）。想改一个团队 skill，去改知识库里的 `skills/` 目录，改动会通过正常的知识库同步扩散给所有人。
+- **删掉 `~/.claude/skills/org-xxx/` 目录不是退订**：下个周期它会被原样重新分发——这与「删掉 agent 提示词里的托管区块就不再刷新」刻意不同，因为 skill 目录一删连托管标记都没了，没有地方记住「这个人拒绝过」。真要关闭，用 `knowbase init --no-skills` 接入，或在 `~/.config/knowbase/config.json` 里把 `"skills"` 设为 `false`。
+- **同名保护**：如果你本机的 `~/.claude/skills/org-x` 不是 knowbase 建的（目录里没有 `.knowbase.json` 托管标记），一律不会被覆盖或删除。`knowbase status` 会把这种情况列成一条提示，并以非零退出码提醒你——通常改个名字，下一周期就能收到团队版。
+- **只对 Claude Code 生效**：Codex 没有 skills 目录机制，这条分发链路不涉及 `~/.codex/`。
+- `knowbase uninstall` 会清掉所有带托管标记的团队 skill 副本，你自己的 skill（无论是否叫 `org-*`）原样保留。
+
 ## 开机自启机制
 
 | 平台 | 机制 |
@@ -131,6 +148,7 @@ knowbase status
 <知识库目录>/.knowbase-pause          # pause 的实现：存在即跳过同步周期
 ~/.claude/CLAUDE.md                   # init 写入 knowbase 托管区块（uninstall 移除）
 ~/.codex/AGENTS.md                    # 同上
+~/.claude/skills/org-<name>/          # 知识库 skills/<name>/ 的托管副本（uninstall 移除）
 ```
 
 `.knowbase-pause` 已由 init 种入仓库 `.gitignore`，不参与同步。
