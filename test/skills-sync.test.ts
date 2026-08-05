@@ -14,6 +14,7 @@ import {
   dedupeByTargetCase,
   planSkills,
   syncSkills,
+  uninstallSkills,
 } from "../src/skills-sync.js";
 import type { SkillSource, SkillMarker } from "../src/skills-sync.js";
 
@@ -638,5 +639,41 @@ describe("syncSkills", () => {
     const changes = syncSkills(kb, home);
     expect(changes.map((c) => c.action)).toEqual(["foreign"]);
     expect(fs.readFileSync(path.join(skills, "org-a"), "utf8")).toBe("我是个文件，不是目录\n");
+  });
+});
+
+describe("uninstallSkills", () => {
+  it("清掉托管副本，保留用户自己的 skill 与自建的 org-*", () => {
+    const kb = tmpDir("uninst-kb");
+    const { home, skills } = fakeHome("uninst-home");
+    seedSkill(kb, "a");
+    seedSkill(kb, "b");
+    syncSkills(kb, home);
+    write(skills, "my-own/SKILL.md", "---\nname: my-own\n---\n私人\n");
+    write(skills, "org-handmade/SKILL.md", "---\nname: org-handmade\n---\n手写\n");
+
+    const removals = uninstallSkills(home);
+    expect(removals.filter((r) => r.removed).map((r) => r.target).sort()).toEqual([
+      "org-a",
+      "org-b",
+    ]);
+    expect(fs.existsSync(path.join(skills, "org-a"))).toBe(false);
+    expect(fs.existsSync(path.join(skills, "org-b"))).toBe(false);
+    expect(fs.existsSync(path.join(skills, "my-own", "SKILL.md"))).toBe(true);
+    expect(fs.readFileSync(path.join(skills, "org-handmade", "SKILL.md"), "utf8")).toContain(
+      "手写"
+    );
+  });
+
+  it("目标目录不存在 → 空结果、不抛错", () => {
+    const { home } = fakeHome("uninst-empty");
+    expect(uninstallSkills(home)).toEqual([]);
+  });
+
+  it("顺手清掉残留临时目录", () => {
+    const { home, skills } = fakeHome("uninst-tmp");
+    write(skills, `org-x${TMP_SUFFIX}12345/SKILL.md`, "半成品\n");
+    uninstallSkills(home);
+    expect(fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX))).toEqual([]);
   });
 });

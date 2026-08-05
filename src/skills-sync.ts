@@ -551,3 +551,28 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
   }
   return out;
 }
+
+export interface SkillRemoval {
+  target: string;
+  removed: boolean;
+}
+
+/**
+ * uninstall 时调用：移除所有带托管标记的副本。
+ * 无标记的目录一律不碰——包括用户自己手写的 org-* skill。
+ */
+export function uninstallSkills(home: string = os.homedir()): SkillRemoval[] {
+  const skillsHome = skillsHomeDir(home);
+  cleanTmpDirs(skillsHome);
+  const removals: SkillRemoval[] = [];
+  for (const e of readExistingTargets(skillsHome)) {
+    if (!e.marker) continue;
+    try {
+      fs.rmSync(path.join(skillsHome, e.target), { recursive: true, force: true });
+      removals.push({ target: e.target, removed: true });
+    } catch {
+      removals.push({ target: e.target, removed: false });
+    }
+  }
+  return removals;
+}
