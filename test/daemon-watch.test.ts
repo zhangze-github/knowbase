@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync, ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeOrigin, g } from "./helpers.js";
+import { tmpDir, makeOrigin, g, denyPush } from "./helpers.js";
 
 const CLI = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -194,4 +194,60 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     // git 侧确实没动：索引仍是未提交状态
     expect(g(kb, "status", "--porcelain").stdout).toContain("index.md");
   }, 40000);
+});
+
+describe("守护进程：push 熔断跨周期保持", () => {
+  it("熔断状态在多个周期间由同一个 gate 持有，since 不因新周期而重置", async () => {
+    const kb = path.join(root, "kb");
+    // interval 拉大到 3600：轮询本身不会触发周期，两轮都只靠文件监听触发，
+    // 避免真实等 5 分钟的 PROBE_INTERVAL_MS 探测窗口，测试可以跑得很快。
+    const init = spawnSync(
+      "node",
+      [CLI, "init", bare, "--dir", kb, "--interval", "3600"],
+      { encoding: "utf8", env: envFor() }
+    );
+    expect(init.status).toBe(0);
+
+    // 远端只保留读权限：pre-receive 钩子对任何 push 都拒绝
+    denyPush(bare);
+
+    // daemon 启动前先制造一次本地改动，保证启动即执行的首轮周期就会尝试 push 并被拒
+    fs.writeFileSync(path.join(kb, "first.md"), "first change\n");
+
+    daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
+
+    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
+    const readState = (): any => {
+      try {
+        return JSON.parse(fs.readFileSync(statePath, "utf8"));
+      } catch {
+        return null;
+      }
+    };
+
+    // 首轮：等 pushBlocked 落盘
+    const blockedOnce = await waitFor(() => !!readState()?.pushBlocked, 10000);
+    expect(blockedOnce).toBe(true);
+    const state1 = readState();
+    const since1: string = state1.pushBlocked.since;
+    const lastCycleAt1: string | undefined = state1.lastCycleAt;
+    expect(since1).toBeTruthy();
+
+    // 二轮：靠文件监听再触发一次周期。PROBE_INTERVAL_MS 是 5 分钟，这两轮之间
+    // 不会真的再探测一次，第二轮的 push 应静默跳过——这正是我们要验证的场景：
+    // 若 runCycle 误把 `new PushGate()` 挪到内部（每轮新建），熔断会失效，
+    // 第二轮会当作「首次」重新尝试 push 并把 since 重置为本轮时刻。
+    fs.writeFileSync(path.join(kb, "second.md"), "second change\n");
+    const cycled = await waitFor(() => {
+      const s = readState();
+      return !!s && s.lastCycleAt !== lastCycleAt1;
+    }, 10000);
+    expect(cycled).toBe(true);
+
+    const state2 = readState();
+    // 断言 1：连跑至少两个周期后，状态文件里仍带 pushBlocked。
+    expect(state2.pushBlocked).toBeTruthy();
+    // 断言 2：两轮之间 since 不变——这条才是真正能抓住「每轮新建 gate」退化的断言。
+    expect(state2.pushBlocked.since).toBe(since1);
+  }, 20000);
 });
