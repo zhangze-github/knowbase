@@ -79,6 +79,24 @@ exec "${realGit}" "$@"
   return dir;
 }
 
+/**
+ * 往 bare 远端推一个合法 skill，让后续 init 克隆时自然带下来。
+ * label 只用于隔离每个用例的临时 clone 目录。
+ */
+function seedRemoteSkill(name: string, label: string): void {
+  const seed = path.join(root, `seed-${label}`);
+  g(root, "clone", bare, seed);
+  const dir = path.join(seed, "skills", name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "SKILL.md"),
+    `---\nname: ${name}\ndescription: 演示\n---\n\n步骤一\n`
+  );
+  g(seed, "add", "-A");
+  g(seed, "commit", "-m", `add skill ${name}`);
+  g(seed, "push", "origin", "HEAD:main");
+}
+
 beforeEach(() => {
   root = tmpDir("cli");
   home = path.join(root, "home");
@@ -165,6 +183,34 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     // 默认 init（复用同目录）→ 开关回到 true
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
     expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).agentConfig).toBe(true);
+  });
+
+  it("init 默认分发团队 skills 并持久化 skills 开关", () => {
+    const kb = path.join(root, "kb");
+    const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+    seedRemoteSkill("demo", "init-skills");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(true);
+
+    const dest = path.join(home, ".claude", "skills", "org-demo");
+    expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).toContain("name: org-demo");
+    expect(fs.existsSync(path.join(dest, ".knowbase.json"))).toBe(true);
+  });
+
+  it("--no-skills 跳过分发并持久化为 false", () => {
+    const kb = path.join(root, "kb");
+    const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+    seedRemoteSkill("demo", "no-skills");
+
+    expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(false);
+    expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+
+    // 默认 init（复用同目录）→ 开关回到 true 且补上分发
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(true);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
   });
 
   it("init → 写文件 → sync 推送 → 另一 clone 可见", () => {

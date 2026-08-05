@@ -29,6 +29,8 @@ export interface Config {
   watch?: boolean;
   /** 是否维护 AI agent 全局提示词托管区块（默认 true；init --no-agent-config 存 false）。 */
   agentConfig?: boolean;
+  /** 是否把知识库 skills/ 分发到 ~/.claude/skills（默认 true；init --no-skills 存 false）。 */
+  skills?: boolean;
 }
 
 /** 配置目录：$XDG_CONFIG_HOME/knowbase 或 ~/.config/knowbase 。 */
@@ -155,6 +157,7 @@ export function loadConfig(): Config {
     branch: parsed.branch ?? DEFAULT_BRANCH,
     watch: parsed.watch !== false,
     agentConfig: parsed.agentConfig !== false,
+    skills: parsed.skills !== false,
   };
 }
 

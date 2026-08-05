@@ -12,6 +12,7 @@ import {
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
+import { syncSkills } from "../skills-sync.js";
 
 export interface InitOptions {
   dir?: string;
@@ -19,6 +20,8 @@ export interface InitOptions {
   interval?: string;
   /** commander 的 --no-agent-config 会把该值设为 false（默认 true）。 */
   agentConfig?: boolean;
+  /** commander 的 --no-skills 会把该值设为 false（默认 true）。 */
+  skills?: boolean;
 }
 
 function printSshGuidance(url: string): void {
@@ -187,6 +190,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     interval,
     branch,
     agentConfig: opts.agentConfig !== false,
+    skills: opts.skills !== false,
   };
   saveConfig(cfg);
   console.log("• 已保存配置");
@@ -231,6 +235,35 @@ export function cmdInit(url: string, opts: InitOptions): number {
     } catch (e) {
       console.warn(
         `⚠ 配置 AI agent 全局提示词时出错：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+  }
+
+  // 7. 分发团队 skills（默认开启，--no-skills 可跳过）
+  if (opts.skills === false) {
+    console.log("• 已跳过团队 skills 分发（--no-skills）");
+  } else {
+    try {
+      const changes = syncSkills(dir);
+      const done = changes.filter(
+        (c) => c.action === "created" || c.action === "updated"
+      );
+      if (done.length > 0) {
+        console.log(
+          `• 已分发团队 skills ${done.length} 个到 ~/.claude/skills：` +
+            done.map((c) => c.target).join(", ")
+        );
+      } else if (changes.length === 0) {
+        console.log("• 知识库暂无 skills/ 目录，跳过团队 skills 分发");
+      }
+      for (const c of changes) {
+        if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {
+          console.warn(`⚠ skill ${c.name} 未分发：${c.reason}`);
+        }
+      }
+    } catch (e) {
+      console.warn(
+        `⚠ 分发团队 skills 时出错：${e instanceof Error ? e.message : String(e)}`
       );
     }
   }
