@@ -123,13 +123,20 @@ export function cmdStatus(): number {
     console.log("");
     console.log(`⚠ 无 push 权限：本地 ${ahead} 个提交只在本机，未同步给团队。`);
     console.log(`  原因：${pb.reason}`);
-    console.log(
-      `  下次自动重试：${new Date(pb.nextProbeAt).toLocaleString()}。` +
-        `补上权限后会自动恢复，无需手动操作。`
-    );
-    anomalies.push(
-      `无 push 权限，${ahead} 个提交未推送给团队——请联系仓库管理员补上写权限，之后自动恢复。`
-    );
+    if (running) {
+      console.log(
+        `  下次自动重试：${new Date(pb.nextProbeAt).toLocaleString()}。` +
+          `补上权限后会自动恢复，无需手动操作。`
+      );
+      anomalies.push(
+        `无 push 权限，${ahead} 个提交未推送给团队——请联系仓库管理员补上写权限，之后自动恢复。`
+      );
+    } else {
+      console.log(`  守护进程未运行，恢复运行后会自动重试。`);
+      anomalies.push(
+        `无 push 权限，${ahead} 个提交未推送给团队——请先恢复守护进程运行，并联系仓库管理员补上写权限，之后自动恢复。`
+      );
+    }
   }
 
   // agent 提示词索引（这个机制默认静默运行，必须给出可见性）

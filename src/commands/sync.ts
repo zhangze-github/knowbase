@@ -20,6 +20,10 @@ export function cmdSync(): number {
   }
   if (r.pushed) console.log("• 已推送到远端");
   if (r.pushRejected) console.log("• push 被拒（并发竞争），下一周期会先合并再推");
+  if (r.pushDenied)
+    console.log(
+      "• 没有仓库写权限：本地改动已提交在本机，暂无法同步给团队。请联系仓库管理员开通写权限，之后守护进程会自动恢复推送。"
+    );
 
   if (r.error) {
     console.error(`✗ ${r.error}`);

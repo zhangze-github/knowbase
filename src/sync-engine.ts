@@ -230,8 +230,10 @@ export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
           logger.log(flip === "recovered" ? "push 权限已恢复，继续推送" : "已推送到远端");
         } else if (p.denied) {
           result.error = `push 无权限：${reason}`;
-          if (flip === "blocked" || !gate) {
+          if (flip === "blocked") {
             logger.log(`push 无权限，已暂停推送（每 5 分钟自动重试一次）：${reason}`);
+          } else if (!gate) {
+            logger.log(`push 无权限：${reason}`);
           }
         } else if (p.rejected) {
           logger.log("push 被拒（并发竞争），下一周期先合并再推");

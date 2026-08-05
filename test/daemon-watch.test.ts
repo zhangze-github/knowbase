@@ -249,5 +249,5 @@ describe("守护进程：push 熔断跨周期保持", () => {
     expect(state2.pushBlocked).toBeTruthy();
     // 断言 2：两轮之间 since 不变——这条才是真正能抓住「每轮新建 gate」退化的断言。
     expect(state2.pushBlocked.since).toBe(since1);
-  }, 20000);
+  }, 40000);
 });

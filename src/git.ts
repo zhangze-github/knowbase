@@ -296,7 +296,7 @@ function runPush(
     : ["push", remote, `HEAD:${branch}`];
   const r = git(args, { cwd: dir, timeoutMs });
   if (r.code === 0) return { ok: true, rejected: false, denied: false, result: r };
-  const failure = classifyPushFailure(r.stderr + r.stdout);
+  const failure = classifyPushFailure(r.stderr + "\n" + r.stdout);
   return {
     ok: false,
     rejected: failure === "rejected",
@@ -316,8 +316,10 @@ export function push(
 }
 
 /**
- * 只做写权限探测：不传输对象，但仍会向服务端发起 receive-pack 协商，
- * 鉴权在该阶段发生，因此即使本地无新提交也能真实反映写权限。
+ * 只反映传输层鉴权：HTTPS 对无 push 权限用户在 info/refs 阶段即返回 401/403，
+ * SSH 由服务端在 spawn receive-pack 前拒绝。服务端 hook / 保护分支类策略拒绝
+ * 探测不到（--dry-run 不发送 ref 更新、不触发 pre-receive），那类要等真实 push
+ * 才暴露，由守护进程的熔断兜底。
  */
 export function pushDryRun(
   dir: string,
