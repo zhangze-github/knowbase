@@ -408,7 +408,7 @@ describe("init 写权限预检", () => {
     expect(r.out).not.toContain("只读模式");
   });
 
-  it("无权限且需种入规则时：种规则分支走「暂不推送」，不出现旧的重试文案", () => {
+  it("无权限且需种入规则时：种规则分支走「暂不推送」", () => {
     // makeOrigin 预置的远端已经带 union / 忽略规则，ensureLine 恒为 false，
     // 走不到「种入规则」那段——用 makeBareOrigin 搭一个不含规则文件（但已有
     // 提交，满足 headBorn 守卫）的远端，让 seeded=true，才能覆盖这条分支。
@@ -419,14 +419,20 @@ describe("init 写权限预检", () => {
       PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
     });
     expect(r.code).toBe(0);
+    // 锁住 readOnly 分支的新文案——变异测试验证过：回退 init.ts 里这段改写
+    // 会让这条断言失败。
     expect(r.out).toContain("暂不推送");
-    // 只读模式下种规则那段不该再走旧的「守护进程会自动重试」文案
-    // （只读模式的分支现在有专门的提示，见上面的 toContain("暂不推送")）。
-    expect(r.out).not.toContain("守护进程会自动重试");
+    // 「守护进程会自动重试」这句旧文案只在「真实 push 失败且失败类型不是
+    // denied（如网络抖动）」时才会输出；本用例 readOnly=true，代码根本不走
+    // 真实 push，这句文案在只读路径上按构造不可达——就算去掉 readOnly 早退
+    // 分支，makeBareOrigin 搭的远端也没有拒绝机制，真实 push 会直接成功；
+    // 再给它装 denyPush 钩子，命中的也是 p.denied 分支、输出只读提示而非这
+    // 句文案。没有能让这条断言产生意义的测试环境，因此不对它做断言，避免
+    // 留一条名存实亡的断言误导后来者。
+    //
     // 注：init.ts 里 p.denied 为真的那条警告分支（readOnly=false，但真实 push
-    // 被拒）当前测试基础设施覆盖不到——要触发它需要「写权限预检（探测分支/
-    // dry-run）判定为有权限，但随后真实 push 却被拒」这种权限中途变化的场景，
-    // git shim 只能模拟固定的 --dry-run 拒绝，无法模拟这种时序竞争，不为此
-    // 硬造场景。
+    // 被拒）同样覆盖不到——要触发它需要「写权限预检（探测分支/dry-run）判定
+    // 为有权限，但随后真实 push 却被拒」这种权限中途变化的场景，git shim 只能
+    // 模拟固定的 --dry-run 拒绝，无法模拟这种时序竞争，不为此硬造场景。
   });
 });
