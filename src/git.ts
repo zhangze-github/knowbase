@@ -284,17 +284,7 @@ export interface PushOutcome {
   result: GitResult;
 }
 
-function runPush(
-  dir: string,
-  remote: string,
-  branch: string,
-  timeoutMs: number,
-  dryRun: boolean
-): PushOutcome {
-  const args = dryRun
-    ? ["push", "--dry-run", remote, `HEAD:${branch}`]
-    : ["push", remote, `HEAD:${branch}`];
-  const r = git(args, { cwd: dir, timeoutMs });
+function toOutcome(r: GitResult): PushOutcome {
   if (r.code === 0) return { ok: true, rejected: false, denied: false, result: r };
   const failure = classifyPushFailure(r.stderr + r.stdout);
   return {
@@ -312,12 +302,18 @@ export function push(
   branch: string,
   timeoutMs = 60000
 ): PushOutcome {
-  return runPush(dir, remote, branch, timeoutMs, false);
+  const r = git(["push", remote, `HEAD:${branch}`], { cwd: dir, timeoutMs });
+  return toOutcome(r);
 }
 
 /**
- * 只做写权限探测：不传输对象，但仍会向服务端发起 receive-pack 协商，
- * 鉴权在该阶段发生，因此即使本地无新提交也能真实反映写权限。
+ * 只做写权限探测：不用 `git push --dry-run`——dry-run 在协议层面从不发送
+ * 任何 ref-update 命令（哪怕远端会拒绝），receive-pack 端的鉴权/pre-receive
+ * 钩子只在收到真实命令时才执行；本地刚 clone 完、跟远端一模一样是 init 时
+ * 最常见的状态，此时 dry-run 永远判定"成功"，会把无写权限误判成有写权限。
+ *
+ * 改为真实推送一个命名空间隔离的临时探测分支再立刻删除：探测分支指向的
+ * 提交本就在远端（clone 而来），不产生新对象传输；探测完成后不留痕迹。
  */
 export function pushDryRun(
   dir: string,
@@ -325,7 +321,14 @@ export function pushDryRun(
   branch: string,
   timeoutMs = 30000
 ): PushOutcome {
-  return runPush(dir, remote, branch, timeoutMs, true);
+  const probe = `refs/heads/knowbase-probe-${branch}-${process.pid}-${Date.now().toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}`;
+  const r = git(["push", remote, `HEAD:${probe}`], { cwd: dir, timeoutMs });
+  if (r.code !== 0) return toOutcome(r);
+  // 清理探测分支；删除失败不影响探测结论（下次探测会换新名字）。
+  git(["push", remote, "--delete", probe], { cwd: dir, timeoutMs });
+  return { ok: true, rejected: false, denied: false, result: r };
 }
 
 /** 是否配置了 origin 远端。 */
