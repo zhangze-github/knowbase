@@ -10,8 +10,9 @@ import {
   hashSkillDir,
   readSkillSources,
   dedupeByTargetCase,
+  planSkills,
 } from "../src/skills-sync.js";
-import type { SkillSource } from "../src/skills-sync.js";
+import type { SkillSource, SkillMarker } from "../src/skills-sync.js";
 
 describe("prefixedName", () => {
   it("正常名字加前缀", () => {
@@ -237,5 +238,71 @@ describe("dedupeByTargetCase", () => {
     const r = dedupeByTargetCase([s("Foo"), s("foo"), s("fOo")]);
     expect(r.kept.map((k) => k.name)).toEqual(["Foo"]);
     expect(r.dropped.map((d) => d.name).sort()).toEqual(["fOo", "foo"]);
+  });
+});
+
+describe("planSkills", () => {
+  const src = (name: string, hash: string): SkillSource => ({
+    name,
+    dir: `/kb/skills/${name}`,
+    target: `org-${name}`,
+    hash,
+  });
+  const mk = (source: string, hash: string): SkillMarker => ({
+    source,
+    hash,
+    syncedAt: "2026-08-05T00:00:00.000Z",
+  });
+
+  it("目标不存在 → created", () => {
+    const p = planSkills([src("a", "h1")], []);
+    expect(p).toEqual([{ name: "a", target: "org-a", action: "created" }]);
+  });
+
+  it("有标记且哈希相同 → unchanged", () => {
+    const p = planSkills([src("a", "h1")], [{ target: "org-a", marker: mk("a", "h1") }]);
+    expect(p[0].action).toBe("unchanged");
+  });
+
+  it("有标记但哈希不同 → updated", () => {
+    const p = planSkills([src("a", "h2")], [{ target: "org-a", marker: mk("a", "h1") }]);
+    expect(p[0].action).toBe("updated");
+  });
+
+  it("目标存在但无标记 → foreign，带原因", () => {
+    const p = planSkills([src("a", "h1")], [{ target: "org-a", marker: null }]);
+    expect(p[0].action).toBe("foreign");
+    expect(p[0].reason).toBeTruthy();
+  });
+
+  it("有标记但源已消失 → removed", () => {
+    const p = planSkills([], [{ target: "org-gone", marker: mk("gone", "h1") }]);
+    expect(p).toEqual([{ name: "gone", target: "org-gone", action: "removed" }]);
+  });
+
+  it("无标记且不在源列表中 → 完全不出现在计划里（用户自己的 skill）", () => {
+    const p = planSkills([], [{ target: "org-mine", marker: null }]);
+    expect(p).toEqual([]);
+  });
+
+  it("混合场景：各分支互不干扰", () => {
+    const p = planSkills(
+      [src("new", "h"), src("same", "h1"), src("moved", "h2"), src("theirs", "h")],
+      [
+        { target: "org-same", marker: mk("same", "h1") },
+        { target: "org-moved", marker: mk("moved", "h1") },
+        { target: "org-theirs", marker: null },
+        { target: "org-orphan", marker: mk("orphan", "h") },
+        { target: "my-own", marker: null },
+      ]
+    );
+    const byName = Object.fromEntries(p.map((c) => [c.name, c.action]));
+    expect(byName).toEqual({
+      new: "created",
+      same: "unchanged",
+      moved: "updated",
+      theirs: "foreign",
+      orphan: "removed",
+    });
   });
 });

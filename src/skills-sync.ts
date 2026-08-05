@@ -252,3 +252,67 @@ export function readSkillSources(kbDir: string): {
   for (const d of dropped) bad(d.name, `与 ${d.winner} 仅大小写不同，已跳过`);
   return { sources: kept, invalid };
 }
+
+export interface SkillMarker {
+  /** 源目录名（知识库里的原名）。 */
+  source: string;
+  /** 落盘时的源内容哈希。 */
+  hash: string;
+  syncedAt: string;
+}
+
+export interface ExistingTarget {
+  /** ~/.claude/skills 下的目录名。 */
+  target: string;
+  /** 读到的托管标记；不是 knowbase 托管的为 null。 */
+  marker: SkillMarker | null;
+}
+
+/**
+ * 纯决策：源列表 + 目标现状 → 动作列表。不碰文件系统，便于把六个分支都测到。
+ *
+ * 无标记的目标一律不碰——包括用户自己恰好叫 org-xxx 的 skill。所有权信息放在
+ * 目录内的标记文件而非集中式 state，是为了让孤儿识别自愈：state 文件丢失会让
+ * 托管副本永久变成无人认领的垃圾，标记在目录内则永远认得出来。
+ */
+export function planSkills(
+  sources: SkillSource[],
+  existing: ExistingTarget[]
+): SkillChange[] {
+  const changes: SkillChange[] = [];
+  const byTarget = new Map(existing.map((e) => [e.target, e]));
+  const wanted = new Set<string>();
+
+  for (const s of sources) {
+    wanted.add(s.target);
+    const cur = byTarget.get(s.target);
+    if (!cur) {
+      changes.push({ name: s.name, target: s.target, action: "created" });
+      continue;
+    }
+    if (!cur.marker) {
+      changes.push({
+        name: s.name,
+        target: s.target,
+        action: "foreign",
+        reason: "同名目录不是 knowbase 托管的，未覆盖",
+      });
+      continue;
+    }
+    changes.push({
+      name: s.name,
+      target: s.target,
+      action: cur.marker.hash === s.hash ? "unchanged" : "updated",
+    });
+  }
+
+  // 反向扫：托管副本的源已不在列表中 → 孤儿。覆盖「知识库里删了 skill」与
+  // 「重命名了 skill」两种情况。
+  for (const e of existing) {
+    if (!e.marker) continue;
+    if (wanted.has(e.target)) continue;
+    changes.push({ name: e.marker.source, target: e.target, action: "removed" });
+  }
+
+  return changes;
+}
