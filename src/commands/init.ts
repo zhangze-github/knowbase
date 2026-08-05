@@ -128,6 +128,23 @@ export function cmdInit(url: string, opts: InitOptions): number {
     }
   }
 
+  // 2.5 写权限预检。ls-remote 只验证读权限——只读成员会一路成功接入，
+  // 然后每个周期默默推不上去。这里提前把事实说清楚，但不阻断：
+  // 只读同样是合法用法（能读到团队知识就已经有价值）。
+  let readOnly = false;
+  if (headBorn) {
+    const dry = git.pushDryRun(dir, "origin", branch);
+    readOnly = dry.denied;
+    if (readOnly) {
+      console.warn("");
+      console.warn("⚠ 你对该仓库没有 push 权限，knowbase 将以只读模式运行：");
+      console.warn("  能拉到团队的更新，本地改动只提交在本机、不会同步出去。");
+      console.warn(`  原因：${git.pushFailureReason(dry.result)}`);
+      console.warn("  需要写权限请联系仓库管理员，补上后自动恢复，无需重新 init。");
+      console.warn("");
+    }
+  }
+
   // 3. 种入 union 合并规则与忽略规则（无则提交推送）
   let seeded = false;
   seeded = ensureLine(path.join(dir, ".gitattributes"), "*.md merge=union") || seeded;
@@ -137,9 +154,17 @@ export function cmdInit(url: string, opts: InitOptions): number {
     git.addAll(dir);
     const c = git.commit(dir, "chore(knowbase): 种入 union 合并规则与忽略规则");
     if (git.ok(c)) {
-      const p = git.push(dir, "origin", branch);
-      if (!p.ok) {
-        console.warn("⚠ 规则已本地提交，但推送未成功（守护进程会自动重试）。");
+      if (readOnly) {
+        console.log("  （只读模式：规则已本地提交，暂不推送）");
+      } else {
+        const p = git.push(dir, "origin", branch);
+        if (!p.ok) {
+          console.warn(
+            p.denied
+              ? "⚠ 规则已本地提交，但没有 push 权限——将以只读模式运行，补上写权限后自动恢复。"
+              : "⚠ 规则已本地提交，但推送未成功（守护进程会自动重试）。"
+          );
+        }
       }
     } else {
       console.warn(

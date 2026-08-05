@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeOrigin, g } from "./helpers.js";
+import { tmpDir, makeOrigin, g, denyPush } from "./helpers.js";
 
 const CLI = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -340,5 +340,26 @@ describe("status 展示 push 熔断", () => {
     expect(r.out).toContain("You are not allowed to push code to this project.");
     expect(r.out).toContain("无需手动操作");
     expect(r.code).toBe(1);
+  });
+});
+
+describe("init 写权限预检", () => {
+  it("无 push 权限时警告只读模式但不阻断接入", () => {
+    const kb = path.join(root, "kb");
+    denyPush(bare);
+    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
+    expect(r.code).toBe(0); // 不阻断
+    expect(r.out).toContain("只读模式");
+    expect(r.out).toContain("无需重新 init");
+    expect(r.out).not.toContain("守护进程会自动重试");
+    // 配置照常写入，接入流程走完
+    expect(fs.existsSync(path.join(home, ".config", "knowbase", "config.json"))).toBe(true);
+  });
+
+  it("有权限时不出现只读模式警告", () => {
+    const kb = path.join(root, "kb");
+    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
+    expect(r.code).toBe(0);
+    expect(r.out).not.toContain("只读模式");
   });
 });
