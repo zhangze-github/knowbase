@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeOrigin, g, denyPush } from "./helpers.js";
+import { tmpDir, makeOrigin, g } from "./helpers.js";
 
 const CLI = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -33,6 +33,44 @@ function knowbase(args: string[], extraEnv: Record<string, string> = {}) {
     },
   });
   return { code: res.status ?? 1, out: (res.stdout ?? "") + (res.stderr ?? "") };
+}
+
+/** 解析真实 git 可执行文件的绝对路径，供 shim 脚本 exec 转发用（不能在 shim 里再走 PATH，否则递归）。 */
+function resolveRealGit(): string {
+  const r = spawnSync("which", ["git"], { encoding: "utf8" });
+  const p = r.stdout.trim();
+  if (!p) throw new Error("找不到真实 git，无法搭建 shim");
+  return p;
+}
+
+/**
+ * 搭一个「git shim」：命中 `push --dry-run` 时打印 GitLab 无 push 权限的真实
+ * 文案并 exit 1，其余命令原样转发给真实 git。
+ *
+ * 为什么不能像别处那样用本地 bare 仓库 + pre-receive 钩子模拟：`--dry-run`
+ * 在协议层面从不发送 ref-update 命令（哪怕远端会拒绝），receive-pack 端的
+ * pre-receive 钩子只在收到真实命令时才执行，本地 bare 仓库的传输层又没有
+ * GitHub/GitLab 那种「协商之前先鉴权」的中间层，导致钩子永远不会被触发——
+ * 模拟不出「--dry-run 也会撞上权限拒绝」这个真实远端才有的行为。用 shim
+ * 直接在更外层伪造服务端的拒绝响应，就不依赖本地 bare 仓库有没有鉴权层了。
+ */
+function makeDenyDryRunShim(dir: string): string {
+  fs.mkdirSync(dir, { recursive: true });
+  const realGit = resolveRealGit();
+  const shim = path.join(dir, "git");
+  fs.writeFileSync(
+    shim,
+    `#!/bin/sh
+if [ "$1" = "push" ] && [ "$2" = "--dry-run" ]; then
+  echo "remote: You are not allowed to push code to this project." >&2
+  echo "fatal: unable to access 'origin': The requested URL returned error: 403" >&2
+  exit 1
+fi
+exec "${realGit}" "$@"
+`
+  );
+  fs.chmodSync(shim, 0o755);
+  return dir;
 }
 
 beforeEach(() => {
@@ -346,8 +384,10 @@ describe("status 展示 push 熔断", () => {
 describe("init 写权限预检", () => {
   it("无 push 权限时警告只读模式但不阻断接入", () => {
     const kb = path.join(root, "kb");
-    denyPush(bare);
-    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
+    const shimDir = makeDenyDryRunShim(path.join(root, "git-shim"));
+    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"], {
+      PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+    });
     expect(r.code).toBe(0); // 不阻断
     expect(r.out).toContain("只读模式");
     expect(r.out).toContain("无需重新 init");

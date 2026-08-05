@@ -131,6 +131,11 @@ export function cmdInit(url: string, opts: InitOptions): number {
   // 2.5 写权限预检。ls-remote 只验证读权限——只读成员会一路成功接入，
   // 然后每个周期默默推不上去。这里提前把事实说清楚，但不阻断：
   // 只读同样是合法用法（能读到团队知识就已经有价值）。
+  //
+  // 已知局限：pushDryRun 基于 `git push --dry-run`，只能反映传输层鉴权
+  // （如 GitHub/GitLab 在 ref 协商之前就返回的 401/403）；服务端 hook 或
+  // 保护分支一类需要真实提交命令才会触发的拒绝，dry-run 探测不到，要等
+  // 真实 push 才会暴露，那时由守护进程内置的熔断器兜底（见 push-gate）。
   let readOnly = false;
   if (headBorn) {
     const dry = git.pushDryRun(dir, "origin", branch);
