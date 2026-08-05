@@ -198,6 +198,27 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.existsSync(path.join(kb, ".knowbase-pause"))).toBe(false);
   });
 
+  it("status 展示 CLI 版本（已接入与未接入都要有）", () => {
+    const pkgVersion = (
+      JSON.parse(
+        fs.readFileSync(
+          path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json"),
+          "utf8"
+        )
+      ) as { version: string }
+    ).version;
+
+    // 未接入：early return 之前也要能看到版本
+    const before = knowbase(["status"]);
+    expect(before.out).toContain(`CLI 版本：  ${pkgVersion}`);
+
+    // 已接入
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
+    const after = knowbase(["status"]);
+    expect(after.out).toContain(`CLI 版本：  ${pkgVersion}`);
+  });
+
   it("status 反映：守护进程未运行 + 冲突副本（AC4）", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);

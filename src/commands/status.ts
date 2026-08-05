@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createRequire } from "node:module";
 import {
   configExists,
   configPath,
@@ -44,8 +45,13 @@ function fmtTime(iso?: string): string {
   return `${d.toLocaleString()}（${rel}）`;
 }
 
+const require = createRequire(import.meta.url);
+const pkg = require("../../package.json") as { version: string };
+
 /** `knowbase status`：一屏看清健康度。 */
 export function cmdStatus(): number {
+  // 版本放在未接入 early return 之前：排查「装的是哪个版本」不该以接入为前提
+  console.log(`CLI 版本：  ${pkg.version}`);
   if (!configExists()) {
     console.log("尚未接入。运行 `knowbase init <git-url>` 完成一次性接入。");
     return 0;
