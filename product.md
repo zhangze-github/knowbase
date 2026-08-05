@@ -1,6 +1,6 @@
-# lorebase 项目文档:AI 时代的团队知识库同步工具
+# knowbase 项目文档:AI 时代的团队知识库同步工具
 
-> npm 包名:lorebase(已确认可用) 命令名:lorebase
+> npm 包名:knowbase(已发布) 命令名:knowbase 源码仓库名:lorebase
 > 状态:规格定稿,进入实现
 > 最后更新:2026-07-29
 
@@ -12,7 +12,7 @@
 
 这个定位背后的判断:AI 编程助手能力越强,「它不了解组织隐性知识」这个瓶颈越突出。把组织知识变成 agent 可直接消费、可直接写入的资产,是所有深度使用 AI 的团队都绕不开的基础设施。而 AI 作为写入者,恰好解决了传统知识库「写入成本高、逐渐无人维护」的经典死因。
 
-名字的由来:lore 意指一个群体内口口相传的知识与典故——正是「组织隐性知识」的对应词。
+名字的由来:最初取名 lorebase——lore 意指一个群体内口口相传的知识与典故,正是「组织隐性知识」的对应词;后因发布考虑,npm 包名与命令名改为更直白的 knowbase,源码仓库名沿用 lorebase。
 
 ### 1.2 已确定的技术路线
 
@@ -26,7 +26,7 @@
 
 这条技术路线中,唯一需要工具化的空隙是:**让「本地文件夹 ⇋ Git 远端」的同步在后台无人值守地发生**——用户(尤其非技术成员)不应接触 pull/push/commit/冲突这些概念。
 
-lorebase 就是填这个空隙的工具,它的职责边界刻意收窄为一句话:
+knowbase 就是填这个空隙的工具,它的职责边界刻意收窄为一句话:
 
 > **安装即忘:一条命令接入,开机自启,后台自动双向同步,冲突全自动处理,永不需要人介入。**
 
@@ -37,7 +37,7 @@ lorebase 就是填这个空隙的工具,它的职责边界刻意收窄为一句�
 ### 2.1 命令面(五个命令,不再多)
 
 ```
-lorebase init <git-url> [--dir <path>]
+knowbase init <git-url> [--dir <path>]
     一次性接入。依次完成:
     1. 环境检查:git 是否可用(建议 ≥ 2.30)、凭证是否免交互
        (以 git ls-remote 验证,卡住/失败时给出 SSH key 配置引导而非报错退出)
@@ -46,20 +46,20 @@ lorebase init <git-url> [--dir <path>]
     4. 注册开机自启的后台守护进程(按平台自动选择机制)并立即启动
     5. 输出 CLAUDE.md / AGENTS.md 集成片段,供用户粘贴(或 --write-claude-md 直接追加)
 
-lorebase status
+knowbase status
     一屏看清健康度:守护进程是否运行 / 上次成功同步时间 /
     本地未推送的改动数 / 待处理的冲突副本文件列表 / 远端连通性。
     另:经 update-notifier 在有新版本时提示升级命令(检查在后台进程完成
     并缓存,绝不拖慢本命令;每 24 小时至多检查一次)
 
-lorebase sync
+knowbase sync
     立即触发一次同步周期(不等定时器),前台输出过程,用于排查和急用
 
-lorebase pause / lorebase resume
+knowbase pause / knowbase resume
     暂停与恢复自动同步。供人或 agent 在大范围改动期间调用,
     避免半成品被定时器提交。pause 状态在 status 中醒目显示
 
-lorebase uninstall
+knowbase uninstall
     干净移除:注销自启、停止守护进程、保留本地文件夹(明确告知用户)
 ```
 
@@ -99,45 +99,45 @@ lorebase uninstall
 | macOS | launchd LaunchAgent | RunAtLoad + KeepAlive |
 | Windows | 计划任务(登录触发)或 Windows 服务 | 实现工作量的主要不确定项,预留最多时间 |
 
-init/uninstall 负责注册与注销;直接生成对应平台的服务/任务定义文件,指向 `lorebase daemon`,守护进程崩溃由服务管理器自动重启。
+init/uninstall 负责注册与注销;直接生成对应平台的服务/任务定义文件,指向 `knowbase daemon`,守护进程崩溃由服务管理器自动重启。
 
 ### 2.5 配置与文件约定
 
 ```
-~/.config/lorebase/config.json   # 仓库地址、本地目录、同步间隔、分支
-~/.config/lorebase/lorebase.log      # 滚动日志(status 报错时引导用户看这里)
-<知识库目录>/.lorebase-pause      # pause 的实现:存在即跳过同步周期
+~/.config/knowbase/config.json   # 仓库地址、本地目录、同步间隔、分支
+~/.config/knowbase/knowbase.log      # 滚动日志(status 报错时引导用户看这里)
+<知识库目录>/.knowbase-pause      # pause 的实现:存在即跳过同步周期
                              # (用标记文件而非内存状态,保证 agent 可用 touch 兼容操作)
 ```
 
-`.lorebase-pause` 与日志类文件由 init 种入仓库 `.gitignore`,不参与同步——否则暂停标记会同步到他人设备,把全团队暂停。
+`.knowbase-pause` 与日志类文件由 init 种入仓库 `.gitignore`,不参与同步——否则暂停标记会同步到他人设备,把全团队暂停。
 
 ## 三、技术选型
 
 ### 3.1 语言与分发
 
-**Node.js,发布到 npm(包名 lorebase,bin 为 lorebase)。** 理由:目标用户是使用 Claude Code / Codex 的团队,Node 是 Claude Code 的运行依赖,环境必然存在;npm 提供现成的安装(`npm i -g lorebase`)与版本分发通道。升级采用提示式而非自动(见 5.3):CLI 入口集成 update-notifier,有新版时提示手动升级命令。
+**Node.js,发布到 npm(包名 knowbase,bin 为 knowbase)。** 理由:目标用户是使用 Claude Code / Codex 的团队,Node 是 Claude Code 的运行依赖,环境必然存在;npm 提供现成的安装(`npm i -g knowbase`)与版本分发通道。升级采用提示式而非自动(见 5.3):CLI 入口集成 update-notifier,有新版时提示手动升级命令。
 
 **Git 操作 shell out 调系统 git(child_process),不用 go-git/isomorphic-git 类库。** 理由:冲突策略依赖 union merge driver、`git show :2:` 等完整能力,内嵌实现支持不全;目标用户机器必有 git,依赖成本为零。
 
 ### 3.2 架构形态
 
-单包双角色:`lorebase <命令>` 是 CLI 入口;`lorebase daemon`(隐藏命令)是被服务管理器拉起的守护进程本体,跑同步循环。CLI 与守护进程之间无需 IPC——status 通过读日志、检查进程与 git 状态实现,pause 通过标记文件实现,保持实现简单。同步引擎已有经双机冲突实测的参考实现(sync-engine.js,见附录)。
+单包双角色:`knowbase <命令>` 是 CLI 入口;`knowbase daemon`(隐藏命令)是被服务管理器拉起的守护进程本体,跑同步循环。CLI 与守护进程之间无需 IPC——status 通过读日志、检查进程与 git 状态实现,pause 通过标记文件实现,保持实现简单。同步引擎已有经双机冲突实测的参考实现(sync-engine.js,见附录)。
 
 ## 四、验收标准
 
-1. 全新机器(三平台各测)上,`lorebase init <url>` 一条命令完成接入,重启后同步自动恢复运行
+1. 全新机器(三平台各测)上,`knowbase init <url>` 一条命令完成接入,重启后同步自动恢复运行
 2. 双机并发测试:两台设备同时编辑同一 md 文件 → 双方内容均保留;同时编辑非 md 文件同一行 → 生成冲突副本,双方内容均可找回,同步不中断
 3. 断网 30 分钟期间持续本地编辑 → 恢复网络后自动补同步,无数据丢失、无人工介入
-4. `lorebase status` 能准确反映:守护进程挂掉、凭证失效、存在冲突副本三种异常状态
+4. `knowbase status` 能准确反映:守护进程挂掉、凭证失效、存在冲突副本三种异常状态
 5. agent 在知识库目录工作全程(pause → 编辑 → resume)不产生半成品提交
 
 ## 五、范围与路线
 
 ### 5.1 里程碑
 
-- **M1(2–3 天):** 同步引擎(移植已验证的 sync-engine.js)+ `lorebase sync` / `lorebase status`,Linux 单平台跑通验收标准 2、3
-- **M2(2–3 天):** `lorebase init` / `pause` / `resume` / `uninstall` + 三平台自启,重点攻 Windows,跑通验收 1、4、5
+- **M1(2–3 天):** 同步引擎(移植已验证的 sync-engine.js)+ `knowbase sync` / `knowbase status`,Linux 单平台跑通验收标准 2、3
+- **M2(2–3 天):** `knowbase init` / `pause` / `resume` / `uninstall` + 三平台自启,重点攻 Windows,跑通验收 1、4、5
 - **M3(1 天):** 发布 npm,团队内全员接入
 
 ### 5.2 团队接入后的第一个验证目标
@@ -146,7 +146,7 @@ init/uninstall 负责注册与注销;直接生成对应平台的服务/任务定
 
 ### 5.3 非目标(明确不做,防止范围蔓延)
 
-- **自动更新——已评估,决定不做。** 全自动热更新一个触碰所有人数据的守护进程,爆炸半径过大(坏版本数小时内污染全团队),且受 npm 全局目录权限制约。采用 update-notifier 提示 + 用户手动 `npm i -g lorebase` 升级
+- **自动更新——已评估,决定不做。** 全自动热更新一个触碰所有人数据的守护进程,爆炸半径过大(坏版本数小时内污染全团队),且受 npm 全局目录权限制约。采用 update-notifier 提示 + 用户手动 `npm i -g knowbase` 升级
 - 知识检索(search)、文档模板、内容校验(lint)——痛了再做,且属于另一个工具的职责
 - PR / 审批 / 权限流程——与「零摩擦直推」的方案前提冲突
 - 内容治理(去重、陈旧检测、冲突副本自动合并)——属于未来「图书管理员 agent」的职责,不进 CLI
@@ -159,5 +159,5 @@ init/uninstall 负责注册与注销;直接生成对应平台的服务/任务定
 
 随附文件,Node 实现以其逻辑为准:
 
-- **sync-engine.js**:同步引擎参考实现(Node.js),完整周期、union 种入、冲突副本、暂停语义均经双机并发实测。注意:其中暂停标记文件名需按 2.5 节改为 `.lorebase-pause`
+- **sync-engine.js**:同步引擎参考实现(Node.js),完整周期、union 种入、冲突副本、暂停语义均经双机并发实测。注意:其中暂停标记文件名需按 2.5 节改为 `.knowbase-pause`
 - **kb-git-sync.sh / kb-git-sync.service**:早期 bash 原型与 systemd 服务文件,可作 Linux 服务定义的参照
