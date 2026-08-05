@@ -138,7 +138,7 @@ describe("P1: 稳定 node 路径", () => {
 describe("提示词：组织/个人边界", () => {
   it("托管区块明确禁止个人内容进入知识库", () => {
     const block = buildBlock("/kb");
-    expect(block).toContain("禁止写入");
+    expect(block).toContain("不进知识库");
     expect(block).toContain("个人偏好");
     expect(block).toContain("全组织共享");
     expect(block).toContain("先询问用户");
