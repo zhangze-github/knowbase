@@ -56,14 +56,14 @@
 **接口**：
 
 - `shouldAttempt(now): boolean` —— 未熔断恒 `true`；熔断中仅当 `now >= nextProbeAt` 返回 `true`（放行一次探测）。
-- `record(outcome, now): void` —— `denied` 则进入 / 维持熔断，`nextProbeAt = now + 5min`；`ok` 则清空状态；其余分类不改变熔断状态。
+- `record(outcome, reason, now)` —— `denied` 则进入 / 维持熔断，`nextProbeAt = now + 5min`；`ok` 则清空状态。**熔断期间的探测若以非 `denied` 的方式失败（网络抖动），窗口同样顺延 5 分钟**——否则窗口不前移，下一周期就立刻又试，退回每 60 秒一次。返回 `"blocked" | "recovered" | "unchanged"` 表示状态是否翻转，调用方据此决定是否写日志。
 - `snapshot()` —— 供 daemon 写入 `DaemonState`。
 
 **探测间隔固定 5 分钟**，不做递增退避。权限授予通常是管理员的一次性人工动作，5 分钟的恢复延迟可接受；固定间隔也让 `status` 里「下次重试时间」这个提示始终准确、易解释。
 
 **生命周期**：熔断状态活在守护进程内存里，随进程重启清空——重启后先试一次 push，失败再熔断，代价是一次多余请求，换来无需持久化状态、也无需处理状态文件损坏。
 
-**前台 `knowbase sync` 无视熔断**：通过 `SyncDeps` 传入 `forcePush: true`。用户主动跑这条命令就是想立刻知道现在通不通，让他等 5 分钟窗口是反直觉的。
+**前台 `knowbase sync` 天然无视熔断**，无需额外开关：熔断状态只活在守护进程内存里，`cmdSync` 是另一个进程、不持有熔断器，`SyncDeps.pushGate` 为 `undefined` 时 `syncOnce` 一律尝试 push。用户主动跑这条命令就是想立刻知道现在通不通，这个行为正是想要的。
 
 ## 5. 熔断期间的同步行为
 
