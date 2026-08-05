@@ -17,7 +17,10 @@
 - 常量：源子目录 `skills`、目标前缀 `org-`、标记文件名 `.knowbase.json`、临时目录后缀 `.knowbase-tmp-`。
 - 目标目录名合法性正则：`^[A-Za-z0-9][A-Za-z0-9._-]*$`。
 - 分发只对 Claude Code（`~/.claude/skills`）生效。Codex 无 skills 目录机制，不做多目标抽象。
-- 每个任务结束时 `npm test` 必须全绿；`npx tsc --noEmit -p tsconfig.json` 必须无错。
+- 每个任务结束时 `npm run build && npm test` 必须全绿；`npx tsc --noEmit -p tsconfig.json` 必须无错。
+- **`npm test` 之前必须 `npm run build`。** `test/cli.test.ts` 跑的是编译产物 `dist/cli.js`（通过 `knowbase()` 辅助函数 spawn 子进程）。改了 `src/` 不重新 build，这些端到端用例会静默地跑在旧 `dist` 上——通过也不能证明你的改动是对的。
+- **测试文件归属**：本项目**没有** `test/config.test.ts` / `test/init.test.ts` / `test/status.test.ts`。CLI 层行为（init 选项、配置持久化、status 输出、uninstall）一律测在 `test/cli.test.ts`，用它已有的 `knowbase(args, extraEnv?)` 辅助函数 spawn 真实 CLI，`HOME` 与 `XDG_CONFIG_HOME` 已由该函数注入临时目录。模块级函数（如 `refreshOrgSkills`）测在对应的 `test/<module>.test.ts`，直接 import 并传显式 `home` 参数——照 `test/sync-engine.test.ts` 里 `describe("refreshAgentPrompts")` 那一段的写法。
+- **不要为了可测性给 `cmdStatus` / `cmdInit` 增加 `home` 参数。** 端到端测试是 spawn 子进程 + 注入 `HOME`，`os.homedir()` 在子进程里自然解析到临时目录，签名不用动。
 - **注意 `tsconfig.json` 的 `exclude` 含 `test`**：`tsc` 不检查测试文件，vitest 也只转译不做类型检查。所以测试里的类型错误**两个命令都抓不到**——写测试时对着 Task 的 `Produces` 签名手工核对参数与返回类型，别指望工具兜底。
 - 测试里凡涉及 `~`，一律传显式的临时 `home` 参数，**绝不**依赖 `os.homedir()`——否则跑测试会污染开发者本机的 `~/.claude/skills`。
 - 每个任务末尾单独 commit，遵循现有 conventional commits 风格（`feat(skills):` / `test(skills):` / `docs:`）。commit message 用中文正文。
@@ -565,7 +568,7 @@ Expected: PASS
 
 - [ ] **Step 5: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 6: Commit**
@@ -1097,7 +1100,7 @@ Expected: PASS
 
 - [ ] **Step 5: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 6: Commit**
@@ -1206,7 +1209,7 @@ Expected: PASS
 
 - [ ] **Step 5: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 6: Commit**
@@ -1224,8 +1227,7 @@ git commit -m "feat(skills): uninstallSkills 移除托管副本"
 - Modify: `src/config.ts:19-32`（`Config` 接口）、`src/config.ts:141-159`（`loadConfig`）
 - Modify: `src/commands/init.ts:16-22`（`InitOptions`）、`:184-190`（保存配置）、`:206` 之后（调用）
 - Modify: `src/cli.ts:41` 之后（新增 `--no-skills` 选项）
-- Modify: `test/config.test.ts`
-- Modify: `test/init.test.ts`
+- Modify: `test/cli.test.ts`（在 `describe("CLI 端到端（真实运行 dist/cli.js）")` 内，紧跟现有的 `it("agentConfig 开关持久化进 config.json")` 之后）
 
 **Interfaces:**
 - Consumes: `syncSkills`（Task 4）
@@ -1233,60 +1235,69 @@ git commit -m "feat(skills): uninstallSkills 移除托管副本"
 
 - [ ] **Step 1: 写失败的测试**
 
-追加到 `test/config.test.ts`（沿用该文件已有的写配置/加载模式）：
+先在 `test/cli.test.ts` 里加一个共用辅助函数（放在文件内已有的 `makeDenyDryRunShim`
+之后、`beforeEach` 之前）。Task 8 也用它，所以必须抽出来，不要在每个用例里重复：
 
 ```ts
-it("skills 缺省为 true，显式 false 保留", () => {
-  // 与 agentConfig 同一口径：配置里没这个键的老用户按开启处理
-  const dir = tmpDir("cfg-skills");
-  process.env.XDG_CONFIG_HOME = dir;
-  const p = path.join(dir, "knowbase", "config.json");
-  fs.mkdirSync(path.dirname(p), { recursive: true });
-
-  fs.writeFileSync(p, JSON.stringify({ repoUrl: "u", dir: "/d" }));
-  expect(loadConfig().skills).toBe(true);
-
-  fs.writeFileSync(p, JSON.stringify({ repoUrl: "u", dir: "/d", skills: false }));
-  expect(loadConfig().skills).toBe(false);
-});
-```
-
-> 实现者注意：`test/config.test.ts` 里已有 `XDG_CONFIG_HOME` 的设置/还原方式，
-> 照抄该文件既有 `beforeEach`/`afterEach` 的做法，不要新造一套。
-
-追加到 `test/init.test.ts`：
-
-```ts
-it("init 默认分发 skills，--no-skills 时跳过且持久化", () => {
-  const root = tmpDir("init-skills");
-  const bare = makeOrigin(root);
-  const dir = path.join(root, "kb");
-  const home = path.join(root, "home");
-  process.env.XDG_CONFIG_HOME = path.join(root, "cfg");
-  process.env.KNOWBASE_SKIP_AUTOSTART = "1";
-
-  // 先建仓库工作区并塞一个 skill，再让 init 克隆——init 是克隆型流程，
-  // 因此 skill 要种到 bare 远端里
-  const seed = path.join(root, "seed2");
-  cloneWorkdir(bare, seed);
-  write(seed, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n\n步骤\n");
+/**
+ * 往 bare 远端推一个合法 skill，让后续 init 克隆时自然带下来。
+ * label 只用于隔离每个用例的临时 clone 目录。
+ */
+function seedRemoteSkill(name: string, label: string): void {
+  const seed = path.join(root, `seed-${label}`);
+  g(root, "clone", bare, seed);
+  const dir = path.join(seed, "skills", name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "SKILL.md"),
+    `---\nname: ${name}\ndescription: 演示\n---\n\n步骤一\n`
+  );
   g(seed, "add", "-A");
-  g(seed, "commit", "-m", "add skill");
+  g(seed, "commit", "-m", `add skill ${name}`);
   g(seed, "push", "origin", "HEAD:main");
+}
+```
 
-  expect(cmdInit(bare, { dir, skills: false })).toBe(0);
-  expect(loadConfig().skills).toBe(false);
+再追加两个用例（紧跟现有的 `it("agentConfig 开关持久化进 config.json")` 之后）：
+
+```ts
+it("init 默认分发团队 skills 并持久化 skills 开关", () => {
+  const kb = path.join(root, "kb");
+  const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+  seedRemoteSkill("demo", "init-skills");
+
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(true);
+
+  const dest = path.join(home, ".claude", "skills", "org-demo");
+  expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).toContain("name: org-demo");
+  expect(fs.existsSync(path.join(dest, ".knowbase.json"))).toBe(true);
+});
+
+it("--no-skills 跳过分发并持久化为 false", () => {
+  const kb = path.join(root, "kb");
+  const cfgPath = path.join(home, ".config", "knowbase", "config.json");
+  seedRemoteSkill("demo", "no-skills");
+
+  expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
+  expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(false);
+  expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+
+  // 默认 init（复用同目录）→ 开关回到 true 且补上分发
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(true);
+  expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
 });
 ```
 
-> 实现者注意：`cmdInit` 的签名与 `HOME` 注入方式照 `test/init.test.ts` 现有用例；
-> 若该文件已有统一的 env 存档/还原 helper，沿用它。若 `cmdInit` 目前不接受
-> `home` 参数，本用例只断言「配置持久化为 false」，**不要**为此改 `cmdInit` 签名。
+> `root` / `home` / `bare` 是 `test/cli.test.ts` 顶层的模块变量，由该文件的
+> `beforeEach` 准备好；`knowbase()` 已把 `HOME` 与 `XDG_CONFIG_HOME` 注入到临时目录，
+> `g()` 已从 `./helpers.js` 导入。都不用重新声明。
 
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `npx vitest run test/config.test.ts test/init.test.ts`
-Expected: FAIL，`skills` 属性不存在 / 值为 `undefined`
+Run: `npm run build && npx vitest run test/cli.test.ts -t skills`
+Expected: FAIL。`config.json` 里没有 `skills` 字段（`undefined`），且 `~/.claude/skills` 不存在
 
 - [ ] **Step 3: 写实现**
 
@@ -1363,18 +1374,18 @@ import { syncSkills } from "../skills-sync.js";
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `npx vitest run test/config.test.ts test/init.test.ts`
+Run: `npm run build && npx vitest run test/cli.test.ts -t skills`
 Expected: PASS
 
 - [ ] **Step 5: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/config.ts src/cli.ts src/commands/init.ts test/config.test.ts test/init.test.ts
+git add src/config.ts src/cli.ts src/commands/init.ts test/cli.test.ts
 git commit -m "feat(skills): 新增 skills 配置开关与 init --no-skills"
 ```
 
@@ -1520,7 +1531,7 @@ Expected: PASS
 
 - [ ] **Step 6: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 7: Commit**
@@ -1537,7 +1548,7 @@ git commit -m "feat(skills): 守护进程周期末分发团队 skills"
 **Files:**
 - Modify: `src/commands/uninstall.ts:11`（import）、`:48` 之后（调用）
 - Modify: `src/commands/status.ts:171` 之后（新增一段）
-- Modify: `test/status.test.ts`
+- Modify: `test/cli.test.ts`（沿用 Task 6 加的 `seedRemoteSkill` 辅助函数）
 
 **Interfaces:**
 - Consumes: `uninstallSkills`（Task 5）、`syncSkills` 相关的 `readSkillSources` / `readExistingTargets` / `skillsHomeDir`（Task 2、4）、`Config.skills`（Task 6）
@@ -1545,37 +1556,65 @@ git commit -m "feat(skills): 守护进程周期末分发团队 skills"
 
 - [ ] **Step 1: 写失败的测试**
 
-追加到 `test/status.test.ts`（沿用该文件已有的 stdout 捕获方式）：
+追加到 `test/cli.test.ts`，紧跟现有的 `it("status 报告索引注入状态：缺失 / 已注入 / 已关闭")`
+之后。`seedRemoteSkill` 已由 Task 6 加好，直接用：
 
 ```ts
-it("status 报告团队 skills 分发情况", () => {
-  const root = tmpDir("status-skills");
-  const bare = makeOrigin(root);
-  const dir = path.join(root, "kb");
-  cloneWorkdir(bare, dir);
-  write(dir, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n\n步骤\n");
-  // …照该文件既有做法写好 config 与 XDG_CONFIG_HOME…
+it("status 报告团队 skills：暂无 / 已分发 / 已关闭", () => {
+  const kb = path.join(root, "kb");
 
-  const out = captureStdout(() => cmdStatus());
-  expect(out).toContain("团队 skills");
+  // 知识库没有 skills/ 目录
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  expect(knowbase(["status"]).out).toContain("知识库暂无 skills/ 目录");
+
+  // 关闭
+  expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
+  expect(knowbase(["status"]).out).toContain("--no-skills");
 });
 
-it("skills 关闭时 status 明说已关闭", () => {
-  // …照该文件既有做法写好 config（skills: false）…
-  const out = captureStdout(() => cmdStatus());
-  expect(out).toContain("--no-skills");
+it("status 统计已分发的团队 skills 数量", () => {
+  const kb = path.join(root, "kb");
+  seedRemoteSkill("demo", "status-count");
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  expect(knowbase(["status"]).out).toContain("已分发 1 个");
+});
+
+it("同名目录非托管时 status 提示未覆盖、计入需要注意并非零退出", () => {
+  const kb = path.join(root, "kb");
+  seedRemoteSkill("demo", "status-foreign");
+  // 先手工占位 org-demo（无 .knowbase.json），模拟成员自己写过同名 skill
+  const own = path.join(home, ".claude", "skills", "org-demo");
+  fs.mkdirSync(own, { recursive: true });
+  fs.writeFileSync(path.join(own, "SKILL.md"), "---\nname: org-demo\n---\n我自己写的\n");
+
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  const s = knowbase(["status"]);
+  expect(s.out).toContain("未覆盖");
+  expect(s.code).toBe(1);
+  // 内容必须原样保留
+  expect(fs.readFileSync(path.join(own, "SKILL.md"), "utf8")).toContain("我自己写的");
+});
+
+it("uninstall 移除托管 skills 副本，保留用户自己的 skill", () => {
+  const kb = path.join(root, "kb");
+  seedRemoteSkill("demo", "uninst-skill");
+  expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+  expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
+
+  const mine = path.join(home, ".claude", "skills", "my-own");
+  fs.mkdirSync(mine, { recursive: true });
+  fs.writeFileSync(path.join(mine, "SKILL.md"), "---\nname: my-own\n---\n私人\n");
+
+  expect(knowbase(["uninstall"]).code).toBe(0);
+  expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(false);
+  expect(fs.readFileSync(path.join(mine, "SKILL.md"), "utf8")).toContain("私人");
 });
 ```
 
-> 实现者注意：`test/status.test.ts` 已有一套搭建 config + 捕获输出的写法，
-> 照抄它。若该文件没有 `captureStdout` helper，用它现有的等价手段。
-> `cmdStatus` 若不接受 `home` 参数，**不要**改它的签名；此处只断言文案分支，
-> 分发路径的正确性已由 Task 4 的集成测试覆盖。
-
 - [ ] **Step 2: 跑测试确认失败**
 
-Run: `npx vitest run test/status.test.ts -t skills`
-Expected: FAIL，输出中不含「团队 skills」
+Run: `npm run build && npx vitest run test/cli.test.ts -t "团队 skills"`
+Expected: FAIL，status 输出中不含「团队 skills」
 
 - [ ] **Step 3: 写实现**
 
@@ -1648,18 +1687,18 @@ import { readExistingTargets, readSkillSources, skillsHomeDir } from "../skills-
 
 - [ ] **Step 4: 跑测试确认通过**
 
-Run: `npx vitest run test/status.test.ts`
+Run: `npm run build && npx vitest run test/cli.test.ts`
 Expected: PASS
 
 - [ ] **Step 5: 全量测试与类型检查**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json`
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
 Expected: 全绿、无类型错误
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/commands/uninstall.ts src/commands/status.ts test/status.test.ts
+git add src/commands/uninstall.ts src/commands/status.ts test/cli.test.ts
 git commit -m "feat(skills): uninstall 清理副本、status 展示分发情况"
 ```
 
@@ -1736,8 +1775,8 @@ Expected: PASS（现有断言全是 `toContain`，加一段文案不会打破它
 
 - [ ] **Step 7: 全量验证**
 
-Run: `npm test && npx tsc --noEmit -p tsconfig.json && npm run build`
-Expected: 全绿、无类型错误、构建成功
+Run: `npm run build && npm test && npx tsc --noEmit -p tsconfig.json`
+Expected: 构建成功、全绿、无类型错误
 
 - [ ] **Step 8: 端到端人工验证**
 
