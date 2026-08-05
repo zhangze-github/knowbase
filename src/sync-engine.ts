@@ -14,6 +14,7 @@ import {
 import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
+import { PushGate } from "./push-gate.js";
 
 export interface SyncDeps {
   logger: Logger;
@@ -21,6 +22,11 @@ export interface SyncDeps {
   now?: () => Date;
   /** 可注入主机名（默认取 safeHostname）。 */
   hostname?: string;
+  /**
+   * push 熔断器（守护进程长驻持有）。不传即不熔断——前台单次同步走这条路，
+   * 用户主动跑 `knowbase sync` 就是想立刻知道现在通不通。
+   */
+  pushGate?: PushGate;
 }
 
 export interface SyncResult {
@@ -29,6 +35,10 @@ export interface SyncResult {
   merged: boolean;
   pushed: boolean;
   pushRejected: boolean;
+  /** push 因权限/凭证被拒（重试无意义）。 */
+  pushDenied: boolean;
+  /** 因熔断跳过了本轮 push。 */
+  pushSkipped: boolean;
   /** 本轮生成的冲突副本文件（相对路径）。 */
   conflictCopies: string[];
   /** 网络/致命步骤出错时的说明；引擎本身不抛异常。 */
@@ -44,6 +54,8 @@ function emptyResult(): SyncResult {
     merged: false,
     pushed: false,
     pushRejected: false,
+    pushDenied: false,
+    pushSkipped: false,
     conflictCopies: [],
   };
 }
@@ -201,16 +213,32 @@ export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
       ? git.aheadCount(dir, upstream) > 0
       : result.committed || result.merged;
     if (shouldPush) {
-      const p = git.push(dir, REMOTE, cfg.branch);
-      result.pushed = p.ok;
-      result.pushRejected = p.rejected;
-      if (p.ok) {
-        logger.log("已推送到远端");
-      } else if (p.rejected) {
-        logger.log("push 被拒（并发竞争），下一周期先合并再推");
+      const gate = deps.pushGate;
+      const nowMs = (deps.now ? deps.now() : new Date()).getTime();
+      if (gate && !gate.shouldAttempt(nowMs)) {
+        // 熔断中且未到探测窗口：静默跳过。这里刻意不写日志——
+        // 每周期一条错误日志本身就是本次要修的问题之一。
+        result.pushSkipped = true;
       } else {
-        result.error = `push 失败：${(p.result.stderr || p.result.stdout).trim()}`;
-        logger.log(result.error + "（下一周期重试）");
+        const p = git.push(dir, REMOTE, cfg.branch);
+        result.pushed = p.ok;
+        result.pushRejected = p.rejected;
+        result.pushDenied = p.denied;
+        const reason = p.ok ? "" : git.pushFailureReason(p.result);
+        const flip = gate?.record(p, reason, nowMs) ?? "unchanged";
+        if (p.ok) {
+          logger.log(flip === "recovered" ? "push 权限已恢复，继续推送" : "已推送到远端");
+        } else if (p.denied) {
+          result.error = `push 无权限：${reason}`;
+          if (flip === "blocked" || !gate) {
+            logger.log(`push 无权限，已暂停推送（每 5 分钟自动重试一次）：${reason}`);
+          }
+        } else if (p.rejected) {
+          logger.log("push 被拒（并发竞争），下一周期先合并再推");
+        } else {
+          result.error = `push 失败：${(p.result.stderr || p.result.stdout).trim()}`;
+          logger.log(result.error + "（下一周期重试）");
+        }
       }
     }
   } catch (e) {

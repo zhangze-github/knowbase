@@ -4,6 +4,7 @@ import path from "node:path";
 import { Logger } from "../src/config.js";
 import { syncOnce, commitMessage, refreshAgentPrompts } from "../src/sync-engine.js";
 import { syncAgentConfig, BLOCK_END } from "../src/agent-config.js";
+import { PushGate, PROBE_INTERVAL_MS } from "../src/push-gate.js";
 import {
   tmpDir,
   makeOrigin,
@@ -13,6 +14,8 @@ import {
   write,
   listConflictCopies,
   g,
+  denyPush,
+  allowPush,
 } from "./helpers.js";
 
 let root: string;
@@ -300,5 +303,121 @@ describe("refreshAgentPrompts", () => {
     expect(() => refreshAgentPrompts(cfg(true), lg, home)).not.toThrow();
     spy.mockRestore();
     expect(fs.readFileSync(logFile, "utf8")).toContain("刷新 agent 提示词失败");
+  });
+});
+
+describe("push 无权限熔断", () => {
+  /** 造一个「本地有改动待推、远端拒绝写入」的场景。 */
+  function setup(): { kb: string; cfg: ReturnType<typeof mkConfig> } {
+    const kb = path.join(root, "kb");
+    cloneWorkdir(bare, kb);
+    denyPush(bare);
+    write(kb, "a.md", "hello\n");
+    return { kb, cfg: mkConfig(bare, kb) };
+  }
+
+  const at = (ms: number) => ({
+    logger,
+    hostname: "hostX",
+    now: () => new Date(ms),
+  });
+
+  const T0 = Date.UTC(2026, 7, 5, 12, 0, 0);
+
+  it("判定为 denied 而不是并发竞争", () => {
+    const { cfg } = setup();
+    const gate = new PushGate();
+    const r = syncOnce(cfg, { ...at(T0), pushGate: gate });
+    expect(r.pushDenied).toBe(true);
+    expect(r.pushRejected).toBe(false);
+    expect(r.pushed).toBe(false);
+    expect(gate.blocked).toBe(true);
+  });
+
+  it("熔断后连跑多轮只尝试一次 push", () => {
+    const { kb, cfg } = setup();
+    const gate = new PushGate();
+    syncOnce(cfg, { ...at(T0), pushGate: gate });
+
+    // 注：步长改为 50_000（而非直觉的 60_000）。PROBE_INTERVAL_MS 是 300_000，
+    // PushGate.shouldAttempt 在到点（>=）时会真的放行一次探测（Task 2 规格明确如此），
+    // 若步长用 60_000，第 5 轮 T0+300_000 恰好等于探测窗口，会触发一次真实（仍被拒绝
+    // 的）push 尝试，与本用例「连跑多轮全程只跳过」的断言矛盾——不是实现的 bug，
+    // 是这个用例的时间取值撞上了窗口边界，因此收窄步长让全部 5 轮都严格落在窗口内。
+    for (let i = 1; i <= 5; i++) {
+      write(kb, `b${i}.md`, "x\n");
+      const r = syncOnce(cfg, { ...at(T0 + i * 50_000), pushGate: gate });
+      expect(r.pushSkipped).toBe(true);
+      expect(r.pushed).toBe(false);
+      // 关键：熔断只掐 push，本地提交必须照常发生
+      expect(r.committed).toBe(true);
+    }
+  });
+
+  it("熔断期间日志里该错误只出现一次", () => {
+    const { kb, cfg } = setup();
+    const gate = new PushGate();
+    syncOnce(cfg, { ...at(T0), pushGate: gate });
+    for (let i = 1; i <= 5; i++) {
+      write(kb, `b${i}.md`, "x\n");
+      syncOnce(cfg, { ...at(T0 + i * 60_000), pushGate: gate });
+    }
+    const log = fs.readFileSync(logger.path(), "utf8");
+    const hits = log.split("\n").filter((l) => l.includes("push 无权限"));
+    expect(hits).toHaveLength(1);
+  });
+
+  it("窗口到点会再探测一次", () => {
+    const { cfg } = setup();
+    const gate = new PushGate();
+    syncOnce(cfg, { ...at(T0), pushGate: gate });
+    const r = syncOnce(cfg, { ...at(T0 + PROBE_INTERVAL_MS), pushGate: gate });
+    expect(r.pushSkipped).toBe(false);
+    expect(r.pushDenied).toBe(true);
+  });
+
+  it("熔断期间仍能合并远端改动（只读模式可用）", () => {
+    const { kb, cfg } = setup();
+    const gate = new PushGate();
+    syncOnce(cfg, { ...at(T0), pushGate: gate });
+
+    // 另一台设备推了内容到远端（绕过钩子：直接改 bare 的另一个 clone 再 push 会被拦，
+    // 所以先摘钩子推完再装回去）
+    allowPush(bare);
+    const other = path.join(root, "other");
+    cloneWorkdir(bare, other);
+    write(other, "from-team.md", "team\n");
+    g(other, "add", "-A");
+    g(other, "commit", "-m", "team change");
+    g(other, "push", "origin", "HEAD:main");
+    denyPush(bare);
+
+    const r = syncOnce(cfg, { ...at(T0 + 60_000), pushGate: gate });
+    expect(r.merged).toBe(true);
+    expect(r.pushSkipped).toBe(true);
+    expect(read(kb, "from-team.md")).toBe("team\n");
+  });
+
+  it("权限恢复后自动继续推送并写一条恢复日志", () => {
+    const { cfg } = setup();
+    const gate = new PushGate();
+    syncOnce(cfg, { ...at(T0), pushGate: gate });
+    expect(gate.blocked).toBe(true);
+
+    allowPush(bare);
+    const r = syncOnce(cfg, { ...at(T0 + PROBE_INTERVAL_MS), pushGate: gate });
+    expect(r.pushed).toBe(true);
+    expect(gate.blocked).toBe(false);
+    expect(fs.readFileSync(logger.path(), "utf8")).toContain("push 权限已恢复");
+  });
+
+  it("不传 pushGate 时不熔断（前台 knowbase sync 的行为）", () => {
+    const { kb, cfg } = setup();
+    const r1 = syncOnce(cfg, at(T0));
+    expect(r1.pushDenied).toBe(true);
+    write(kb, "c.md", "x\n");
+    const r2 = syncOnce(cfg, at(T0 + 1000));
+    expect(r2.pushSkipped).toBe(false);
+    expect(r2.pushDenied).toBe(true);
   });
 });

@@ -81,3 +81,22 @@ export function listConflictCopies(dir: string): string[] {
     .readdirSync(dir)
     .filter((f) => f.includes(".conflict-"));
 }
+
+/**
+ * 给 bare 远端装一个 pre-receive 钩子，真实模拟「有读权限、无写权限」。
+ * git 会给钩子的 stderr 加上 remote: 前缀，输出形态与 GitLab 线上一致。
+ */
+export function denyPush(
+  bare: string,
+  message = "GitLab: You are not allowed to push code to this project."
+): void {
+  const hook = path.join(bare, "hooks", "pre-receive");
+  fs.mkdirSync(path.dirname(hook), { recursive: true });
+  fs.writeFileSync(hook, `#!/bin/sh\necho "${message}" >&2\nexit 1\n`);
+  fs.chmodSync(hook, 0o755);
+}
+
+/** 摘掉拒绝钩子，模拟管理员补上了写权限。 */
+export function allowPush(bare: string): void {
+  fs.rmSync(path.join(bare, "hooks", "pre-receive"), { force: true });
+}
