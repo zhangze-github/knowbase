@@ -106,7 +106,7 @@ pushBlocked?: { since: string; reason: string; nextProbeAt: string };
 
 `init` 现在只跑 `git ls-remote`，那**只验证读权限**——只读成员会一路成功接入，然后默默推不上去。
 
-在 clone 完成后新增一次 `git push --dry-run origin HEAD:<branch>`，走 §3 同一套分类。`--dry-run` 仍会向服务端发起 `git-receive-pack` 协商，鉴权在该阶段发生，因此即使本地无新提交也能真实反映写权限。
+在 clone 完成后新增一次 `git push --dry-run origin HEAD:<branch>`，走 §3 同一套分类。`--dry-run` 不会发送任何 ref 更新，因此不会触发服务端的 `pre-receive` 钩子——它能反映的只是**传输层鉴权**：HTTPS 场景下 `GET /info/refs?service=git-receive-pack` 对无 push 权限的用户返回 401/403，SSH 场景下 GitLab Shell 在 spawn `receive-pack` 前就已拒绝，两者都发生在 ref 协商之前，与本地是否有新提交无关，因此足以识别「完全没有写权限」这一常见场景。但它检测不到服务端 hook、保护分支这类需要评估具体 ref 内容才会触发的策略拒绝——那类拒绝要等一次真实 push 才会暴露，届时由守护进程的熔断兜底（§4）。
 
 判为 `denied` 时**警告但不阻断**，init 继续完成（配置、自启、agent 提示词照常）：
 
@@ -135,3 +135,4 @@ pushBlocked?: { since: string; reason: string; nextProbeAt: string };
 - 关键词匹配依赖托管平台的英文输出。`LC_ALL=C`（§3）能固定 git 自身的文案，但 `remote:` 前缀那部分由服务端产生，不受客户端 locale 控制——若某平台返回中文拒绝信息，分类会失效。
 - 自建 Git 服务若返回完全非常规的拒绝文案，会落进「网络类失败」分支继续重试。这是安全的降级方向：宁可多重试，不可把可恢复的失败误判成永久失败。
 - 熔断状态不持久化（§4），守护进程反复重启会绕过 5 分钟窗口。正常运行下服务管理器不会频繁重启进程，不额外处理。
+- `init` 的 `--dry-run` 预检（§7）只验证传输层鉴权，命中不了服务端 hook、保护分支这类策略拒绝：有写权限但会被保护分支规则挡下的场景，`init` 阶段看不出来，要等第一次真实 push 触发熔断才会暴露。
