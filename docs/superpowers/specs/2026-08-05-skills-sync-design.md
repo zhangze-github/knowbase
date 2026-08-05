@@ -64,11 +64,12 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 {
   "source": "code-review",
   "hash": "<源目录内容的 sha256>",
+  "copyHash": "<副本自身内容的 sha256，不含本标记文件>",
   "syncedAt": "2026-08-05T06:00:00.000Z"
 }
 ```
 
-一个文件干两件事：
+一个文件干三件事：
 
 1. **所有权证明**。`~/.claude/skills/` 下没有这个文件的目录一律不碰——包括用户自己恰好叫 `org-xxx` 的 skill。所有权信息放在目录内而非集中式 state 文件，是为了让孤儿识别自愈：state 文件丢失会让托管副本永久变成无人认领的垃圾，标记在目录内则永远认得出来。
 2. **变更检测**。hash 相同即整目录跳过、零落盘。绝大多数周期都走这条。
@@ -80,6 +81,10 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 - 含可执行位：skill 可能带脚本，`chmod +x` 而内容不变时也必须重新分发（见 §7.1）。
 - 源侧若也存在 `.knowbase.json`（不该有，但成员可能误提交），它参与 hash 计算，但拷贝后会被目标标记覆盖。
 
+`copyHash` 用同一算法算**副本自身**，但跳过标记文件本身（否则自指）。它存在的唯一理由是兑现 §2 的「手改下个周期被覆盖」：只比源哈希的话，成员在 `~/.claude/skills/org-*/` 里改了内容、甚至新塞文件，系统永远报 `unchanged`、永远不覆盖，而 `status` 显示一切正常——那个成员会长期加载一份与团队版分叉的 skill 且无人知晓。
+
+`copyHash` 在标记里是可选字段：本机存量标记没有它，此时视为「对不上」→ 触发一次重装自愈，而不是因此不认所有权。
+
 ## 7. 每周期决策
 
 对每个合法源 skill，看目标 `~/.claude/skills/org-<name>/`：
@@ -87,13 +92,16 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 | 目标状态 | 动作 | 说明 |
 |---|---|---|
 | 不存在 | `create` | 全新拷贝 |
-| 存在，无 `.knowbase.json` | `foreign` | **跳过**，记日志，status 中列出 |
-| 存在，有标记，hash 相同 | `unchanged` | 不落盘 |
-| 存在，有标记，hash 不同 | `update` | 整体重建 |
+| 存在，但不是目录（普通文件／软链指向文件） | `foreign` | **跳过**。「无标记一律不碰」的不变式不区分条目类型 |
+| 存在，无 `.knowbase.json`（或标记损坏） | `foreign` | **跳过**，记日志，status 中列出 |
+| 存在，有标记，源 hash 与 copyHash 都相同 | `unchanged` | 不落盘 |
+| 存在，有标记，源 hash 或 copyHash 任一不同 | `update` | 整体重建 |
+
+判定副本哈希由调用方算好后塞进决策函数的输入，`planSkills` 保持纯函数——它的全部存在理由就是让这几个分支能在不落盘的情况下被完整测到。
 
 再反向扫一遍：`~/.claude/skills/` 下所有含 `.knowbase.json` 的目录，其 `source` 不在当前源列表中 → `orphan`，删除。覆盖「知识库里删了 skill」与「重命名了 skill」两种情况。
 
-同时清理上次崩溃残留的 `*.knowbase-tmp-*` 目录。
+同时清理残留的 `*.knowbase-tmp-*` 目录，**但只清 pid 已不存活的那些**。临时目录名带 pid 正是为了让守护进程的周期刷新与用户手跑的 `init` 能并发写同一目标；若无差别清理，就把这个设计整个抵消了——一方正在拷贝、另一方把它的临时目录删掉，接着前者 `rmSync(finalDir)` 成功（删掉后者刚装好的副本）、`rename` 拿到 ENOENT 报错，净结果是该 skill 在磁盘上消失一个周期。
 
 ### 7.1 写入方式：临时目录 + rename
 
