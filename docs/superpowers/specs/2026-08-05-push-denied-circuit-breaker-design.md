@@ -31,15 +31,18 @@
 
 | 关键词 | 典型来源 |
 |---|---|
-| `permission denied` | SSH publickey 失败；GitHub `Permission to X denied to Y` |
+| `permission denied` | SSH publickey 失败 |
+| `denied to` | GitHub `Permission to X denied to Y` |
 | `authentication failed` | HTTPS 凭证错误 |
 | `could not read username` / `could not read password` | HTTPS 无凭证且 `GIT_TERMINAL_PROMPT=0` |
-| `403` / `forbidden` | HTTPS 无写权限 |
-| `401` / `unauthorized` | 凭证过期 |
+| `returned error: 403` / `forbidden` | HTTPS 无写权限 |
+| `returned error: 401` / `unauthorized` | 凭证过期 |
 | `access denied` | 通用 |
 | `you are not allowed to push` | GitLab 明确文案 |
 | `pre-receive hook declined` / `protected branch` | GitLab / GitHub 保护分支 |
 | `repository not found` | GitHub 对无权限私有库的伪装 404 |
+
+`403` / `401` 不用裸数字匹配，避免 push 输出里的 delta 计数（如 `Compressing objects: 100% (401/401)`）误伤。
 
 **判定顺序：`denied` 先于 `rejected`。** 理由见 §1——保护分支的输出两类关键词都命中，先判 `rejected` 就会退回无限重试。
 
@@ -70,8 +73,10 @@
 `syncOnce` 第 5 步改为先问熔断器：
 
 ```
-shouldPush && (deps.forcePush || gate.shouldAttempt(now))
+shouldPush && (!gate || gate.shouldAttempt(now))
 ```
+
+（`gate` 即 `deps.pushGate`；前台 `cmdSync` 不传，`!gate` 恒真，天然无视熔断。）
 
 commit、fetch、merge 三步**完全不受影响**。没有写权限的成员因此得到一个干净的只读模式：本地改动仍然安全提交在本机（不丢），团队的更新照常拉取合并。权限补上后，下一次探测成功即自动恢复推送，积压的提交一次推完。
 
@@ -97,7 +102,7 @@ pushBlocked?: { since: string; reason: string; nextProbeAt: string };
 ```
 ⚠ 无 push 权限：本地 3 个提交只在本机，未同步给团队。
   原因：GitLab: You are not allowed to push code to this project.
-  下次自动重试：14:35。补上权限后会自动恢复，无需手动操作。
+  下次自动重试：2026/8/5 14:35:00。补上权限后会自动恢复，无需手动操作。
 ```
 
 提交数复用已有的 `git.aheadCount`。「无需手动操作」这句是刻意的：它把用户从「我是不是该做点什么」的焦虑里摘出来，符合「安装即忘」。
@@ -129,6 +134,8 @@ pushBlocked?: { since: string; reason: string; nextProbeAt: string };
 3. **集成测试**：装上拒绝钩子后连跑多轮 `syncOnce`，断言只发生一次 push 尝试；断言本地 commit 与从远端 merge 仍正常；断言日志中该错误只出现一次；摘掉钩子并推进时钟后，断言自动恢复推送。
 
 `status` 的输出断言并入现有 `cli.test.ts`。
+
+**`init` 预检的测试不走真实钩子**：§7 的已知局限决定了 `--dry-run` 撞不到 `pre-receive` 钩子（不发送 ref 更新、不触发钩子执行），给 bare repo 装钩子的方式测不出预检分支。`init` 预检改用 git shim：拦截 `push --dry-run` 参数、直接伪造一次 403 拒绝退出，其余 git 调用原样转发给真实 git 二进制。真实的 `pre-receive` 钩子方案仍保留，用于覆盖 §3/§4/§5 里 `syncOnce` 真实 push 触发熔断的集成测试。
 
 ## 9. 已知局限
 
