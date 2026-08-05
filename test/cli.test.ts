@@ -313,7 +313,11 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
 
     // 知识库没有 skills/ 目录
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
-    expect(knowbase(["status"]).out).toContain("知识库暂无 skills/ 目录");
+    const dayOne = knowbase(["status"]);
+    expect(dayOne.out).toContain("知识库暂无 skills/ 目录");
+    // 「需要注意」汇总里不得出现 skills（否则每个还没建 skills/ 的新团队 status 永久非零退出）
+    const attention = dayOne.out.split("需要注意：")[1] ?? "";
+    expect(attention).not.toContain("skills");
 
     // 关闭
     expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
