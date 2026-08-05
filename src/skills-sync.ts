@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import { pidAlive } from "./config.js";
 
 /**
  * 把知识库 skills/ 下的 Claude Code skill 单向分发到本机 ~/.claude/skills/。
@@ -39,6 +40,11 @@ const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 /** 源目录名 → 托管副本目录名。名字不合法返回 null。 */
 export function prefixedName(name: string): string | null {
   if (!NAME_RE.test(name)) return null;
+  // NAME_RE 允许点号，含 TMP_SUFFIX 的名字（如 "a.knowbase-tmp-9"）在语法上合法，
+  // 但落到 ~/.claude/skills 后会被 readExistingTargets 永久当成临时目录忽略、
+  // 又被 cleanTmpDirs 每周期当垂死临时目录删掉——变成每 60 秒全量重拷一次、
+  // 副本周期性消失的病态状态。挡在这一步比事后排查更便宜。
+  if (name.includes(TMP_SUFFIX)) return null;
   return name.startsWith(ORG_PREFIX) ? name : ORG_PREFIX + name;
 }
 
@@ -87,14 +93,21 @@ export interface SkillFiles {
  *
  * 软链跳过：git 会存软链，而一条指向作者机器路径的软链拷到别人机器上必然
  * 悬空——静默留一条坏链比缺一个文件更难查。
+ *
+ * skip：只在顶层生效的相对名黑名单。目前唯一用途是给托管副本算「副本自身
+ * 哈希」时排除 MARKER_NAME——标记文件里的 syncedAt 每次落盘都变，若把它也
+ * 算进哈希，副本哈希永远等于「刚写完那一刻」，跟自己比较毫无意义。源目录
+ * 调用方不传这个参数，行为与改动前完全一致。
  */
-export function listSkillFiles(dir: string): SkillFiles {
+export function listSkillFiles(dir: string, skip: readonly string[] = []): SkillFiles {
+  const skipTop = new Set(skip);
   const files: string[] = [];
   const symlinks: string[] = [];
   const walk = (cur: string, prefix: string): void => {
     for (const e of fs.readdirSync(cur, { withFileTypes: true })) {
       // 防御性：正常的 org-kb 里 skill 目录下不会有嵌套仓库
       if (e.name === ".git") continue;
+      if (prefix === "" && skipTop.has(e.name)) continue;
       const rel = prefix ? `${prefix}/${e.name}` : e.name;
       if (e.isSymbolicLink()) {
         symlinks.push(rel);
@@ -114,10 +127,12 @@ export function listSkillFiles(dir: string): SkillFiles {
  * - 含路径：否则源里增删文件（内容集合不变时）检测不到。
  * - 排序：否则结果依赖目录遍历顺序，跨平台不稳定。
  * - 含可执行位：skill 可能带脚本，chmod +x 而内容不变时也必须重新分发。
+ *
+ * skip 原样透传给 listSkillFiles，见其注释。
  */
-export function hashSkillDir(dir: string): string {
+export function hashSkillDir(dir: string, skip: readonly string[] = []): string {
   const h = crypto.createHash("sha256");
-  for (const rel of listSkillFiles(dir).files) {
+  for (const rel of listSkillFiles(dir, skip).files) {
     const full = path.join(dir, rel);
     const st = fs.statSync(full);
     h.update(rel, "utf8");
@@ -258,6 +273,13 @@ export interface SkillMarker {
   source: string;
   /** 落盘时的源内容哈希。 */
   hash: string;
+  /**
+   * 落盘时副本自身的内容哈希（不含标记文件本身）。用于检测本机手改。
+   * 可选：本次改动之前落盘的老标记没有这个字段，读到时视为「对不上」触发一次
+   * 自愈重装，而不是因此判定该目录不是 knowbase 托管的——否则升级后所有旧副本
+   * 会被误判成 foreign，永远不再更新。
+   */
+  copyHash?: string;
   syncedAt: string;
 }
 
@@ -266,6 +288,8 @@ export interface ExistingTarget {
   target: string;
   /** 读到的托管标记；不是 knowbase 托管的为 null。 */
   marker: SkillMarker | null;
+  /** 目标副本当前实际内容哈希（不含标记文件）；无标记或读取失败为 null。 */
+  copyHash: string | null;
 }
 
 /**
@@ -299,10 +323,15 @@ export function planSkills(
       });
       continue;
     }
+    // 两个哈希都要对上才算 unchanged：hash 管「源变了没」，copyHash 管「本机
+    // 有没有手改副本」，二者是互相独立的漂移来源，缺一个都会漏检。
+    // marker.copyHash 为 undefined（老标记）时与任何字符串、包括 null 都不
+    // 相等，天然落入 updated 分支——这正是「老标记触发一次自愈重装」的实现方式。
+    const same = cur.marker.hash === s.hash && cur.marker.copyHash === cur.copyHash;
     changes.push({
       name: s.name,
       target: s.target,
-      action: cur.marker.hash === s.hash ? "unchanged" : "updated",
+      action: same ? "unchanged" : "updated",
     });
   }
 
@@ -325,9 +354,14 @@ export function skillsHomeDir(home: string = os.homedir()): string {
 /**
  * 读取目标目录现状。
  *
- * 只看 org- 前缀的目录：我们的目标名恒以 org- 开头（prefixedName 保证），
- * 因此非 org- 目录既不可能是目标、也不可能是我们的，跳过既安全又省去每周期
+ * 只看 org- 前缀的条目：我们的目标名恒以 org- 开头（prefixedName 保证），
+ * 因此非 org- 条目既不可能是目标、也不可能是我们的，跳过既安全又省去每周期
  * 对用户全部个人 skill 的无谓探测。
+ *
+ * 不按类型（目录/软链/普通文件）过滤：org-a 曾经是目录、被用户换成了普通
+ * 文件，也要收进来（marker 必然为 null）。这样它会被 planSkills 判成
+ * foreign 而不动，不会被 installSkill 里 rmSync(finalDir,{recursive:true})
+ * 静默删掉——「无标记一律不碰」这个不变式对文件和目录要一视同仁。
  */
 export function readExistingTargets(skillsHome: string): ExistingTarget[] {
   let entries: fs.Dirent[];
@@ -338,11 +372,13 @@ export function readExistingTargets(skillsHome: string): ExistingTarget[] {
   }
   const out: ExistingTarget[] = [];
   for (const e of entries) {
-    // 软链目标（dotfiles 仓库常这么做）也算目录，用 statSync 而非 isDirectory
-    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
     if (!e.name.startsWith(ORG_PREFIX)) continue;
     if (e.name.includes(TMP_SUFFIX)) continue;
-    out.push({ target: e.name, marker: readMarker(path.join(skillsHome, e.name)) });
+    const dir = path.join(skillsHome, e.name);
+    const marker = readMarker(dir);
+    // 没标记就不是我们托管的，副本哈希无意义，省一次遍历+哈希的开销
+    const copyHash = marker ? hashCopySafe(dir) : null;
+    out.push({ target: e.name, marker, copyHash });
   }
   return out;
 }
@@ -352,15 +388,43 @@ function readMarker(dir: string): SkillMarker | null {
     const m = JSON.parse(fs.readFileSync(path.join(dir, MARKER_NAME), "utf8")) as
       | Partial<SkillMarker>
       | null;
-    // 字段校验后才认所有权：一个被截断或被手改坏的标记不该让我们 rm -rf 这个目录
+    // 字段校验后才认所有权：一个被截断或被手改坏的标记不该让我们 rm -rf 这个目录。
+    // JSON.parse("null") 不抛错、合法返回 null，上面这个 !m 专门挡这种情况。
     if (!m || typeof m.source !== "string" || typeof m.hash !== "string") return null;
-    return { source: m.source, hash: m.hash, syncedAt: String(m.syncedAt ?? "") };
+    const marker: SkillMarker = {
+      source: m.source,
+      hash: m.hash,
+      syncedAt: String(m.syncedAt ?? ""),
+    };
+    // copyHash 类型不对（或没有，即老标记）就留空，不当所有权证据的一部分——
+    // 所有权只认 source/hash，copyHash 只用于 planSkills 里的「要不要重装」判断。
+    if (typeof m.copyHash === "string") marker.copyHash = m.copyHash;
+    return marker;
   } catch {
     return null;
   }
 }
 
-/** 清掉上次崩溃残留的临时目录。 */
+/** 目标副本自身内容哈希，跳过标记文件。读取失败（权限、并发删除）返回 null。 */
+function hashCopySafe(dir: string): string | null {
+  try {
+    return hashSkillDir(dir, [MARKER_NAME]);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 清掉上次崩溃残留的临时目录。
+ *
+ * 只清 pid 已不存活的：临时名带 pid 就是为了让守护进程的周期刷新与用户手跑
+ * 的 init 能同时安全地写各自的临时目录，如果这里无差别按名字匹配就删，等于
+ * 白白抵消了这个设计。典型场景——init 正在拷一个大 skill、刚写完 marker 准备
+ * rename 上位，此刻守护进程的 60 秒周期到点：cleanTmpDirs 若把 init 的临时
+ * 目录删了，init 接下来 rmSync(finalDir) 会先删掉守护进程刚装好的正常副本，
+ * 而 renameSync(tmp, finalDir) 因 tmp 已被删而失败 → 整个 skill 从磁盘消失，
+ * 直到下一周期才重建。解析不出 pid 的（名字被截断、手改过）视为死进程一并清。
+ */
 function cleanTmpDirs(skillsHome: string): void {
   let names: string[];
   try {
@@ -369,7 +433,11 @@ function cleanTmpDirs(skillsHome: string): void {
     return;
   }
   for (const n of names) {
-    if (!n.includes(TMP_SUFFIX)) continue;
+    const idx = n.indexOf(TMP_SUFFIX);
+    if (idx === -1) continue;
+    const pidStr = n.slice(idx + TMP_SUFFIX.length);
+    const pid = /^\d+$/.test(pidStr) ? Number(pidStr) : NaN;
+    if (!Number.isNaN(pid) && pidAlive(pid)) continue;
     try {
       fs.rmSync(path.join(skillsHome, n), { recursive: true, force: true });
     } catch {
@@ -408,9 +476,13 @@ function installSkill(src: SkillSource, skillsHome: string): void {
     if (rewritten === null) throw new Error("SKILL.md 的 name 字段在分发过程中失效");
     fs.writeFileSync(mdPath, rewritten, "utf8");
 
+    // 副本哈希在标记文件写入之前算：这时 tmp 里还没有 MARKER_NAME，传 skip
+    // 只是为了跟 planSkills 那边读到的口径（同样跳过标记文件）保持一致。
+    const copyHash = hashSkillDir(tmp, [MARKER_NAME]);
     const marker: SkillMarker = {
       source: src.name,
       hash: src.hash,
+      copyHash,
       syncedAt: new Date().toISOString(),
     };
     // 最后写：源侧若误提交了同名文件，这一步会把它盖掉
@@ -438,7 +510,10 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
 
   const { sources, invalid } = readSkillSources(kbDir);
   const existing = readExistingTargets(skillsHome);
-  // 源与目标都空时提前返回：不能因为「检查了一下」就凭空创建 ~/.claude/skills
+  // 这段不改变行为：sources 和 existing 都空时 planSkills 必然返回空数组，
+  // 往下走一样得到 invalid 本身。它不是「不凭空创建 ~/.claude/skills」的安全
+  // 网——那个由下面 install 分支里单独出现的 mkdirSync 保证，这里只是提前把
+  // 意图写明，省得读代码的人得看完整个循环才确认这点。别在别处依赖这行当兜底。
   if (sources.length === 0 && existing.length === 0) return invalid;
 
   const plan = planSkills(sources, existing);
@@ -452,6 +527,12 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
     }
     try {
       if (c.action === "removed") {
+        // target 为空串目前走不到这里（invalid 的空 target 是单独收集的，
+        // 从不进入 plan），但这是一行带 rm -rf 的代码：path.join(skillsHome, "")
+        // 等于 skillsHome 本身，一旦调用顺序被改（例如日后有人把 invalid 也
+        // 塞进 plan 里跑一遍），这行就会清空整个 ~/.claude/skills。挡在这里
+        // 让这个不变式靠代码保证，不靠「调用者不会传空 target」的默契。
+        if (!c.target) throw new Error("removed 动作缺少合法 target，拒绝执行删除");
         fs.rmSync(path.join(skillsHome, c.target), { recursive: true, force: true });
       } else {
         const src = byTarget.get(c.target)!;

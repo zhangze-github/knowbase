@@ -39,6 +39,14 @@ describe("prefixedName", () => {
     expect(prefixedName("-lead-dash")).toBeNull();
   });
 
+  it("名字含 TMP_SUFFIX 返回 null", () => {
+    // NAME_RE 允许点号，"a.knowbase-tmp-9" 语法上合法，但落地后会被
+    // readExistingTargets 当成临时目录永久忽略、被 cleanTmpDirs 每周期删除，
+    // 造成周期性重拷/消失，必须在这一步挡住
+    expect(prefixedName(`a${TMP_SUFFIX}9`)).toBeNull();
+    expect(prefixedName(`org-a${TMP_SUFFIX}9`)).toBeNull();
+  });
+
   it("ORG_PREFIX 常量对外可见", () => {
     expect(ORG_PREFIX).toBe("org-");
   });
@@ -251,9 +259,11 @@ describe("planSkills", () => {
     target: `org-${name}`,
     hash,
   });
-  const mk = (source: string, hash: string): SkillMarker => ({
+  // copyHash 缺省不传：模拟老标记（本次改动前落盘的，没有这个字段）。
+  const mk = (source: string, hash: string, copyHash?: string): SkillMarker => ({
     source,
     hash,
+    ...(copyHash !== undefined ? { copyHash } : {}),
     syncedAt: "2026-08-05T00:00:00.000Z",
   });
 
@@ -262,24 +272,53 @@ describe("planSkills", () => {
     expect(p).toEqual([{ name: "a", target: "org-a", action: "created" }]);
   });
 
-  it("有标记且哈希相同 → unchanged", () => {
-    const p = planSkills([src("a", "h1")], [{ target: "org-a", marker: mk("a", "h1") }]);
+  it("有标记且哈希相同、副本哈希也相同 → unchanged", () => {
+    const p = planSkills(
+      [src("a", "h1")],
+      [{ target: "org-a", marker: mk("a", "h1", "c1"), copyHash: "c1" }]
+    );
     expect(p[0].action).toBe("unchanged");
   });
 
-  it("有标记但哈希不同 → updated", () => {
-    const p = planSkills([src("a", "h2")], [{ target: "org-a", marker: mk("a", "h1") }]);
+  it("有标记但源哈希不同 → updated", () => {
+    const p = planSkills(
+      [src("a", "h2")],
+      [{ target: "org-a", marker: mk("a", "h1", "c1"), copyHash: "c1" }]
+    );
+    expect(p[0].action).toBe("updated");
+  });
+
+  it("源哈希相同但副本被手改（copyHash 不匹配）→ updated（自愈重装）", () => {
+    // 这是 I3 的核心场景：marker.hash 与源哈希对得上（源没变），但托管副本
+    // 自身的内容哈希跟落盘时记录的不一致，说明本机手改过副本，必须重装。
+    const p = planSkills(
+      [src("a", "h1")],
+      [{ target: "org-a", marker: mk("a", "h1", "c1"), copyHash: "c2" }]
+    );
+    expect(p[0].action).toBe("updated");
+  });
+
+  it("老标记没有 copyHash 字段 → 视为对不上，触发一次自愈重装而非误判 foreign", () => {
+    // 升级前落盘的标记不带 copyHash，此时不该被当成「不是我们托管的」，
+    // 而是自然落入 updated，重装一次后标记就补齐了这个字段。
+    const p = planSkills(
+      [src("a", "h1")],
+      [{ target: "org-a", marker: mk("a", "h1"), copyHash: "c1" }]
+    );
     expect(p[0].action).toBe("updated");
   });
 
   it("目标存在但无标记 → foreign，带原因", () => {
-    const p = planSkills([src("a", "h1")], [{ target: "org-a", marker: null }]);
+    const p = planSkills([src("a", "h1")], [{ target: "org-a", marker: null, copyHash: null }]);
     expect(p[0].action).toBe("foreign");
     expect(p[0].reason).toBeTruthy();
   });
 
   it("有标记但源已消失 → removed", () => {
-    const p = planSkills([], [{ target: "org-gone", marker: mk("gone", "h1") }]);
+    const p = planSkills(
+      [],
+      [{ target: "org-gone", marker: mk("gone", "h1", "c1"), copyHash: "c1" }]
+    );
     expect(p).toEqual([{ name: "gone", target: "org-gone", action: "removed" }]);
   });
 
@@ -288,12 +327,15 @@ describe("planSkills", () => {
     // 与正确实现直接读 marker.source，两者结果恰好都是 "gone"。
     // org-foo 的源名本身带前缀（prefixedName 不重复加前缀，name 和 target 都是
     // org-foo），反推会得到错误的 "foo"，与正确答案 "org-foo" 分叉，才测得出来。
-    const p = planSkills([], [{ target: "org-foo", marker: mk("org-foo", "h1") }]);
+    const p = planSkills(
+      [],
+      [{ target: "org-foo", marker: mk("org-foo", "h1", "c1"), copyHash: "c1" }]
+    );
     expect(p).toEqual([{ name: "org-foo", target: "org-foo", action: "removed" }]);
   });
 
   it("无标记且不在源列表中 → 完全不出现在计划里（用户自己的 skill）", () => {
-    const p = planSkills([], [{ target: "org-mine", marker: null }]);
+    const p = planSkills([], [{ target: "org-mine", marker: null, copyHash: null }]);
     expect(p).toEqual([]);
   });
 
@@ -301,11 +343,11 @@ describe("planSkills", () => {
     const p = planSkills(
       [src("new", "h"), src("same", "h1"), src("moved", "h2"), src("theirs", "h")],
       [
-        { target: "org-same", marker: mk("same", "h1") },
-        { target: "org-moved", marker: mk("moved", "h1") },
-        { target: "org-theirs", marker: null },
-        { target: "org-orphan", marker: mk("orphan", "h") },
-        { target: "my-own", marker: null },
+        { target: "org-same", marker: mk("same", "h1", "c1"), copyHash: "c1" },
+        { target: "org-moved", marker: mk("moved", "h1", "c1"), copyHash: "c1" },
+        { target: "org-theirs", marker: null, copyHash: null },
+        { target: "org-orphan", marker: mk("orphan", "h", "c1"), copyHash: "c1" },
+        { target: "my-own", marker: null, copyHash: null },
       ]
     );
     const byName = Object.fromEntries(p.map((c) => [c.name, c.action]));
@@ -462,5 +504,117 @@ describe("syncSkills", () => {
     const changes = syncSkills(kb, home);
     const byName = Object.fromEntries(changes.map((c) => [c.name, c.action]));
     expect(byName).toEqual({ good: "created", "no-fm": "invalid" });
+  });
+
+  it("手改托管副本内容 → 下个周期被静默覆盖（自愈重装）", () => {
+    // I3：marker 只存源哈希时，手改副本连跑多轮都不会被发现。装好副本哈希
+    // (copyHash) 之后，手改内容 / 塞进的额外文件都必须在下一次 syncSkills
+    // 被抹掉——这是文件头注释与设计文档承诺的「单向分发，手改被静默覆盖」。
+    const kb = tmpDir("sync12-kb");
+    const { home, skills } = fakeHome("sync12-home");
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+
+    const dest = path.join(skills, "org-a");
+    fs.writeFileSync(path.join(dest, "SKILL.md"), "---\nname: org-a\n---\n\n被手改了\n");
+    write(skills, "org-a/后门.md", "植入的文件\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["updated"]);
+    expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).not.toContain("被手改了");
+    expect(fs.existsSync(path.join(dest, "后门.md"))).toBe(false);
+  });
+
+  it("坏标记（JSON 截断 / 字面 null / 字段类型错误）不被认作托管，目录原样保留", () => {
+    // I2：readMarker 的字段校验是整个功能唯一的删除闸门。构造「目标存在但源
+    // 已消失」的孤儿场景（kb 里没有对应源），如果坏标记被误认成有效标记，
+    // removed 分支会把这个目录 rm -rf 掉；正确实现应该把它当 marker: null，
+    // 完全不碰。"null" 这一条最容易漏：JSON.parse("null") 不抛错、合法返回
+    // null，很容易被写成 `if (!m) return null` 之外没有其他校验就漏掉类型检查。
+    const badMarkers = [
+      ['{"source":"a"', "JSON 截断"],
+      ["null", "字面 null"],
+      ['{"source":123,"hash":"h"}', "字段类型错误"],
+    ] as const;
+
+    for (const [bad, label] of badMarkers) {
+      const kb = tmpDir("sync13-kb");
+      const { home, skills } = fakeHome("sync13-home");
+      write(skills, "org-a/SKILL.md", "---\nname: org-a\n---\n\n原内容\n");
+      write(skills, `org-a/${MARKER_NAME}`, bad);
+
+      const changes = syncSkills(kb, home);
+      expect(changes, label).toEqual([]);
+      expect(fs.existsSync(path.join(skills, "org-a")), label).toBe(true);
+      expect(
+        fs.readFileSync(path.join(skills, "org-a", "SKILL.md"), "utf8"),
+        label
+      ).toContain("原内容");
+    }
+  });
+
+  it("一个 skill 落盘失败不拖垮其余：failed 记录、tmp 清理干净、坏的那个原内容保留", () => {
+    const kb = tmpDir("sync14-kb");
+    const { home, skills } = fakeHome("sync14-home");
+    seedSkill(kb, "good");
+    seedSkill(kb, "bad");
+    syncSkills(kb, home);
+
+    // 改动两个源的内容，让 planSkills 对两者都判 updated——bad 那个会走到
+    // installSkill 里的 rmSync(finalDir)，因为目标目录被 chmod 成只读而失败。
+    write(kb, "skills/good/SKILL.md", "---\nname: good\ndescription: d\n---\n\n新内容\n");
+    write(kb, "skills/bad/SKILL.md", "---\nname: bad\ndescription: d\n---\n\n新内容\n");
+
+    const badDir = path.join(skills, "org-bad");
+    const before = fs.readFileSync(path.join(badDir, "SKILL.md"), "utf8");
+    fs.chmodSync(badDir, 0o500); // r-x：目录内条目不可删，rmSync(finalDir) 会失败
+
+    try {
+      const changes = syncSkills(kb, home);
+      const byName = Object.fromEntries(changes.map((c) => [c.name, c.action]));
+      expect(byName.good).toBe("updated");
+      expect(byName.bad).toBe("failed");
+
+      expect(fs.readFileSync(path.join(skills, "org-good", "SKILL.md"), "utf8")).toContain(
+        "新内容"
+      );
+      // 坏的那个失败前的原内容必须完好，没有被半途替换
+      expect(fs.readFileSync(path.join(badDir, "SKILL.md"), "utf8")).toBe(before);
+
+      const left = fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX));
+      expect(left).toEqual([]);
+    } finally {
+      // 改回可写，否则后续任何清理都会因权限失败
+      fs.chmodSync(badDir, 0o755);
+    }
+  });
+
+  it("用户自己叫 org- 前缀、无标记、源里也没有同名的私人 skill 完全不受影响", () => {
+    // M6：sync6 测的是不带 org- 前缀的 my-own，那个方向本来就没有代码会碰，
+    // 判别力很低。这里用带 org- 前缀但不是我们装的目录，才是真正贴着
+    // readExistingTargets「只看 org- 前缀」这条边界的用例。
+    const kb = tmpDir("sync15-kb");
+    const { home, skills } = fakeHome("sync15-home");
+    seedSkill(kb, "a");
+    write(skills, "org-mine/SKILL.md", "---\nname: org-mine\n---\n\n私人\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.some((c) => c.target === "org-mine")).toBe(false);
+    expect(fs.readFileSync(path.join(skills, "org-mine", "SKILL.md"), "utf8")).toContain("私人");
+  });
+
+  it("~/.claude/skills/org-a 是普通文件而非目录 → 判为 foreign，不被删除覆盖", () => {
+    // M3：readExistingTargets 若按「不是目录就跳过」过滤，这种目标会从
+    // existing 里消失，导致 planSkills 误判 created，installSkill 再对一个
+    // 普通文件做 rmSync(recursive:true) 静默删掉它——破坏「无标记一律不碰」。
+    const kb = tmpDir("sync16-kb");
+    const { home, skills } = fakeHome("sync16-home");
+    seedSkill(kb, "a");
+    fs.mkdirSync(skills, { recursive: true });
+    fs.writeFileSync(path.join(skills, "org-a"), "我是个文件，不是目录\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["foreign"]);
+    expect(fs.readFileSync(path.join(skills, "org-a"), "utf8")).toBe("我是个文件，不是目录\n");
   });
 });
