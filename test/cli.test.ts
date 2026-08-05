@@ -350,6 +350,22 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.readFileSync(path.join(own, "SKILL.md"), "utf8")).toContain("我自己写的");
   });
 
+  it("托管副本被删掉后 status 报「已分发 0 个」，不把待装的算成已分发", () => {
+    // status 是只读命令，报告的是**当前**状态：created 的含义是「副本还不在盘上、
+    // 下一次分发才会装」，算进「已分发」就是虚报。待装的那些由「源 N 个」的差额体现。
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "status-pending");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const dest = path.join(home, ".claude", "skills", "org-demo");
+    expect(knowbase(["status"]).out).toContain("已分发 1 个");
+
+    // 副本被删掉（守护进程下个周期会重新装上，但此刻盘上确实没有）
+    fs.rmSync(dest, { recursive: true });
+    const s = knowbase(["status"]);
+    expect(s.out).toContain("已分发 0 个（org-*），源 1 个");
+    expect(s.out).not.toContain("已分发 1 个");
+  });
+
   it("知识库里删掉 skill 后重跑 init：撤下副本这件事必须打印出来", () => {
     // 静默删掉一个副本一个字不打印，用户只会发现 skill 莫名消失
     // （agent-config 那边连 unchanged 都会打印「已是最新」）。

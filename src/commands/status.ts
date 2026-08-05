@@ -190,8 +190,13 @@ export function cmdStatus(): number {
     const { sources, invalid, protectedTargets } = readSkillSources(cfg.dir);
     const existing = readExistingTargets(skillsHomeDir());
     const plan = planSkills(sources, existing, protectedTargets);
+    // 只数 updated + unchanged，**不含 created**：status 是只读命令，报告的是
+    // 当前状态。created 的含义是「副本还不在盘上、下一次分发才会装」，把它算进
+    // 「已分发」就是虚报——用户在 init 之前跑 status 会看到「已分发 3 个」而磁盘上
+    // 一个都没有。updated 则确实在盘上（只是过期了，Claude Code 正在加载它），算。
+    // 待装的那些由「源 M 个」这个差额体现：看到「已分发 0 个，源 3 个」就知道还没装上。
     const delivered = plan.filter(
-      (c) => c.action === "created" || c.action === "updated" || c.action === "unchanged"
+      (c) => c.action === "updated" || c.action === "unchanged"
     ).length;
     if (sources.length === 0 && existing.every((e) => !e.marker)) {
       // 不计入 anomalies：knowbase 不播种 skills/，「还没有团队 skill」
