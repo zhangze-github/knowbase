@@ -316,3 +316,157 @@ export function planSkills(
 
   return changes;
 }
+
+/** 托管副本落地目录。只有 Claude Code 有这个机制。 */
+export function skillsHomeDir(home: string = os.homedir()): string {
+  return path.join(home, ".claude", "skills");
+}
+
+/**
+ * 读取目标目录现状。
+ *
+ * 只看 org- 前缀的目录：我们的目标名恒以 org- 开头（prefixedName 保证），
+ * 因此非 org- 目录既不可能是目标、也不可能是我们的，跳过既安全又省去每周期
+ * 对用户全部个人 skill 的无谓探测。
+ */
+export function readExistingTargets(skillsHome: string): ExistingTarget[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(skillsHome, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  const out: ExistingTarget[] = [];
+  for (const e of entries) {
+    // 软链目标（dotfiles 仓库常这么做）也算目录，用 statSync 而非 isDirectory
+    if (!e.isDirectory() && !e.isSymbolicLink()) continue;
+    if (!e.name.startsWith(ORG_PREFIX)) continue;
+    if (e.name.includes(TMP_SUFFIX)) continue;
+    out.push({ target: e.name, marker: readMarker(path.join(skillsHome, e.name)) });
+  }
+  return out;
+}
+
+function readMarker(dir: string): SkillMarker | null {
+  try {
+    const m = JSON.parse(fs.readFileSync(path.join(dir, MARKER_NAME), "utf8")) as
+      | Partial<SkillMarker>
+      | null;
+    // 字段校验后才认所有权：一个被截断或被手改坏的标记不该让我们 rm -rf 这个目录
+    if (!m || typeof m.source !== "string" || typeof m.hash !== "string") return null;
+    return { source: m.source, hash: m.hash, syncedAt: String(m.syncedAt ?? "") };
+  } catch {
+    return null;
+  }
+}
+
+/** 清掉上次崩溃残留的临时目录。 */
+function cleanTmpDirs(skillsHome: string): void {
+  let names: string[];
+  try {
+    names = fs.readdirSync(skillsHome);
+  } catch {
+    return;
+  }
+  for (const n of names) {
+    if (!n.includes(TMP_SUFFIX)) continue;
+    try {
+      fs.rmSync(path.join(skillsHome, n), { recursive: true, force: true });
+    } catch {
+      // 清不掉不影响本次分发
+    }
+  }
+}
+
+/**
+ * 整体替换式安装：临时目录 + rename。
+ *
+ * - 不做增量：源里删了文件，增量拷贝检测不到，副本里会残留幽灵文件。
+ * - 临时目录 + rename：避免「删了旧的、拷贝中途崩溃」留下半个 skill 被
+ *   Claude Code 加载。rename 始终同目录、同文件系统。
+ * - 临时名带 pid：守护进程的周期刷新与用户手跑的 init 会同时写同一目标，
+ *   共用固定临时名会让两个进程交错写入同一临时目录。
+ */
+function installSkill(src: SkillSource, skillsHome: string): void {
+  const finalDir = path.join(skillsHome, src.target);
+  const tmp = `${finalDir}${TMP_SUFFIX}${process.pid}`;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  try {
+    for (const rel of listSkillFiles(src.dir).files) {
+      const from = path.join(src.dir, rel);
+      const to = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      // 只搬可执行位，其余权限位按默认 umask。skill 可以带脚本，丢了 +x
+      // 脚本就跑不起来，而这种失败在 agent 侧极难定位。
+      if ((fs.statSync(from).mode & 0o111) !== 0) fs.chmodSync(to, 0o755);
+    }
+
+    const mdPath = path.join(tmp, "SKILL.md");
+    const rewritten = rewriteSkillName(fs.readFileSync(mdPath, "utf8"), src.target);
+    // readSkillSources 已校验过，这里为 null 只可能是源在扫描后被改坏
+    if (rewritten === null) throw new Error("SKILL.md 的 name 字段在分发过程中失效");
+    fs.writeFileSync(mdPath, rewritten, "utf8");
+
+    const marker: SkillMarker = {
+      source: src.name,
+      hash: src.hash,
+      syncedAt: new Date().toISOString(),
+    };
+    // 最后写：源侧若误提交了同名文件，这一步会把它盖掉
+    fs.writeFileSync(
+      path.join(tmp, MARKER_NAME),
+      JSON.stringify(marker, null, 2) + "\n",
+      "utf8"
+    );
+
+    fs.rmSync(finalDir, { recursive: true, force: true });
+    fs.renameSync(tmp, finalDir);
+  } catch (e) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    throw e;
+  }
+}
+
+/**
+ * 把知识库 skills/ 分发到 ~/.claude/skills/。init 与守护进程每周期共用。
+ * 单个 skill 失败记为 failed 并继续下一个：一个坏 skill 不该拖垮整批分发。
+ */
+export function syncSkills(kbDir: string, home: string = os.homedir()): SkillChange[] {
+  const skillsHome = skillsHomeDir(home);
+  cleanTmpDirs(skillsHome);
+
+  const { sources, invalid } = readSkillSources(kbDir);
+  const existing = readExistingTargets(skillsHome);
+  // 源与目标都空时提前返回：不能因为「检查了一下」就凭空创建 ~/.claude/skills
+  if (sources.length === 0 && existing.length === 0) return invalid;
+
+  const plan = planSkills(sources, existing);
+  const byTarget = new Map(sources.map((s) => [s.target, s]));
+  const out: SkillChange[] = [...invalid];
+
+  for (const c of plan) {
+    if (c.action === "unchanged" || c.action === "foreign") {
+      out.push(c);
+      continue;
+    }
+    try {
+      if (c.action === "removed") {
+        fs.rmSync(path.join(skillsHome, c.target), { recursive: true, force: true });
+      } else {
+        const src = byTarget.get(c.target)!;
+        fs.mkdirSync(skillsHome, { recursive: true });
+        installSkill(src, skillsHome);
+      }
+      out.push(c);
+    } catch (e) {
+      out.push({
+        name: c.name,
+        target: c.target,
+        action: "failed",
+        reason: e instanceof Error ? e.message : String(e),
+      });
+    }
+  }
+  return out;
+}

@@ -4,6 +4,8 @@ import path from "node:path";
 import { tmpDir, write } from "./helpers.js";
 import {
   ORG_PREFIX,
+  TMP_SUFFIX,
+  MARKER_NAME,
   prefixedName,
   rewriteSkillName,
   listSkillFiles,
@@ -11,6 +13,7 @@ import {
   readSkillSources,
   dedupeByTargetCase,
   planSkills,
+  syncSkills,
 } from "../src/skills-sync.js";
 import type { SkillSource, SkillMarker } from "../src/skills-sync.js";
 
@@ -280,6 +283,15 @@ describe("planSkills", () => {
     expect(p).toEqual([{ name: "gone", target: "org-gone", action: "removed" }]);
   });
 
+  it("源名本身带 org- 前缀时，removed 的 name 必须来自标记而非从 target 反推", () => {
+    // gone/org-gone 这对数据测不出问题：从 target 掐掉 org- 前缀反推 name，
+    // 与正确实现直接读 marker.source，两者结果恰好都是 "gone"。
+    // org-foo 的源名本身带前缀（prefixedName 不重复加前缀，name 和 target 都是
+    // org-foo），反推会得到错误的 "foo"，与正确答案 "org-foo" 分叉，才测得出来。
+    const p = planSkills([], [{ target: "org-foo", marker: mk("org-foo", "h1") }]);
+    expect(p).toEqual([{ name: "org-foo", target: "org-foo", action: "removed" }]);
+  });
+
   it("无标记且不在源列表中 → 完全不出现在计划里（用户自己的 skill）", () => {
     const p = planSkills([], [{ target: "org-mine", marker: null }]);
     expect(p).toEqual([]);
@@ -304,5 +316,151 @@ describe("planSkills", () => {
       theirs: "foreign",
       orphan: "removed",
     });
+  });
+});
+
+/** 假 home，返回 { home, skills } 两个路径。 */
+function fakeHome(label: string): { home: string; skills: string } {
+  const home = tmpDir(label);
+  return { home, skills: path.join(home, ".claude", "skills") };
+}
+
+describe("syncSkills", () => {
+  it("首次分发：目录落盘、name 改写、子目录带上、标记写入", () => {
+    const kb = tmpDir("sync1-kb");
+    const { home, skills } = fakeHome("sync1-home");
+    seedSkill(kb, "code-review");
+    write(kb, "skills/code-review/references/rules.md", "细则\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["created"]);
+
+    const dest = path.join(skills, "org-code-review");
+    const md = fs.readFileSync(path.join(dest, "SKILL.md"), "utf8");
+    expect(md).toContain("name: org-code-review");
+    expect(md).not.toContain("name: code-review\n");
+    expect(fs.readFileSync(path.join(dest, "references/rules.md"), "utf8")).toBe("细则\n");
+
+    const marker = JSON.parse(fs.readFileSync(path.join(dest, MARKER_NAME), "utf8"));
+    expect(marker.source).toBe("code-review");
+    expect(marker.hash).toMatch(/^[0-9a-f]{64}$/);
+    expect(typeof marker.syncedAt).toBe("string");
+  });
+
+  it("二次调用 unchanged 且不落盘", () => {
+    const kb = tmpDir("sync2-kb");
+    const { home, skills } = fakeHome("sync2-home");
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+
+    const md = path.join(skills, "org-a", "SKILL.md");
+    const before = fs.statSync(md).mtimeMs;
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["unchanged"]);
+    expect(fs.statSync(md).mtimeMs).toBe(before);
+  });
+
+  it("源内容改动 → 重建；源里删文件 → 副本里也没了", () => {
+    const kb = tmpDir("sync3-kb");
+    const { home, skills } = fakeHome("sync3-home");
+    seedSkill(kb, "a");
+    write(kb, "skills/a/extra.md", "临时\n");
+    syncSkills(kb, home);
+    expect(fs.existsSync(path.join(skills, "org-a", "extra.md"))).toBe(true);
+
+    fs.rmSync(path.join(kb, "skills/a/extra.md"));
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["updated"]);
+    // 整体替换而非增量：幽灵文件必须消失
+    expect(fs.existsSync(path.join(skills, "org-a", "extra.md"))).toBe(false);
+  });
+
+  it("源 skill 删除 → 托管副本被清理", () => {
+    const kb = tmpDir("sync4-kb");
+    const { home, skills } = fakeHome("sync4-home");
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+    fs.rmSync(path.join(kb, "skills/a"), { recursive: true });
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["removed"]);
+    expect(fs.existsSync(path.join(skills, "org-a"))).toBe(false);
+  });
+
+  it("目标同名但无标记 → foreign，内容不动", () => {
+    const kb = tmpDir("sync5-kb");
+    const { home, skills } = fakeHome("sync5-home");
+    seedSkill(kb, "a");
+    write(skills, "org-a/SKILL.md", "---\nname: org-a\n---\n我自己写的\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes[0].action).toBe("foreign");
+    expect(fs.readFileSync(path.join(skills, "org-a", "SKILL.md"), "utf8")).toContain(
+      "我自己写的"
+    );
+  });
+
+  it("用户自己的非 org- skill 完全不受影响", () => {
+    const kb = tmpDir("sync6-kb");
+    const { home, skills } = fakeHome("sync6-home");
+    seedSkill(kb, "a");
+    write(skills, "my-own/SKILL.md", "---\nname: my-own\n---\n私人\n");
+
+    syncSkills(kb, home);
+    expect(fs.readFileSync(path.join(skills, "my-own", "SKILL.md"), "utf8")).toContain("私人");
+  });
+
+  it("残留的临时目录被清掉", () => {
+    const kb = tmpDir("sync7-kb");
+    const { home, skills } = fakeHome("sync7-home");
+    seedSkill(kb, "a");
+    write(skills, `org-a${TMP_SUFFIX}99999/SKILL.md`, "半成品\n");
+
+    syncSkills(kb, home);
+    const left = fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX));
+    expect(left).toEqual([]);
+  });
+
+  it("保留可执行位", () => {
+    const kb = tmpDir("sync8-kb");
+    const { home, skills } = fakeHome("sync8-home");
+    seedSkill(kb, "a");
+    write(kb, "skills/a/run.sh", "#!/bin/sh\necho hi\n");
+    fs.chmodSync(path.join(kb, "skills/a/run.sh"), 0o755);
+
+    syncSkills(kb, home);
+    const st = fs.statSync(path.join(skills, "org-a", "run.sh"));
+    expect(st.mode & 0o111).not.toBe(0);
+  });
+
+  it("源里有软链 → 跳过该条目，其余文件正常拷贝，副本中无坏链", () => {
+    const kb = tmpDir("sync9-kb");
+    const { home, skills } = fakeHome("sync9-home");
+    seedSkill(kb, "a");
+    write(kb, "skills/a/real.md", "真的\n");
+    fs.symlinkSync("/nowhere/gone", path.join(kb, "skills/a/dangling.md"));
+
+    syncSkills(kb, home);
+    const dest = path.join(skills, "org-a");
+    expect(fs.readFileSync(path.join(dest, "real.md"), "utf8")).toBe("真的\n");
+    expect(fs.existsSync(path.join(dest, "dangling.md"))).toBe(false);
+  });
+
+  it("skills/ 不存在 → 无动作、不抛错、不创建目标目录", () => {
+    const kb = tmpDir("sync10-kb");
+    const { home, skills } = fakeHome("sync10-home");
+    expect(syncSkills(kb, home)).toEqual([]);
+    expect(fs.existsSync(skills)).toBe(false);
+  });
+
+  it("invalid 源出现在返回的变更清单里", () => {
+    const kb = tmpDir("sync11-kb");
+    const { home } = fakeHome("sync11-home");
+    seedSkill(kb, "good");
+    write(kb, "skills/no-fm/SKILL.md", "# 正文\n");
+
+    const changes = syncSkills(kb, home);
+    const byName = Object.fromEntries(changes.map((c) => [c.name, c.action]));
+    expect(byName).toEqual({ good: "created", "no-fm": "invalid" });
   });
 });
