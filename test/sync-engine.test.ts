@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { Logger } from "../src/config.js";
-import { syncOnce, commitMessage, refreshAgentPrompts } from "../src/sync-engine.js";
+import {
+  syncOnce,
+  commitMessage,
+  refreshAgentPrompts,
+  refreshOrgSkills,
+} from "../src/sync-engine.js";
 import { syncAgentConfig, BLOCK_END } from "../src/agent-config.js";
 import { PushGate, PROBE_INTERVAL_MS } from "../src/push-gate.js";
 import {
@@ -303,6 +308,51 @@ describe("refreshAgentPrompts", () => {
     expect(() => refreshAgentPrompts(cfg(true), lg, home)).not.toThrow();
     spy.mockRestore();
     expect(fs.readFileSync(logFile, "utf8")).toContain("刷新 agent 提示词失败");
+  });
+});
+
+describe("refreshOrgSkills", () => {
+  it("周期末分发团队 skills", () => {
+    const root = tmpDir("engine-skills");
+    const bare = makeOrigin(root);
+    const dir = path.join(root, "kb");
+    cloneWorkdir(bare, dir);
+    const home = path.join(root, "home");
+    write(dir, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n\n步骤\n");
+
+    refreshOrgSkills({ ...mkConfig(bare, dir) }, new Logger(path.join(root, "log")), home);
+
+    const md = path.join(home, ".claude", "skills", "org-demo", "SKILL.md");
+    expect(fs.readFileSync(md, "utf8")).toContain("name: org-demo");
+  });
+
+  it("skills: false → 不写入 ~/.claude/skills", () => {
+    const root = tmpDir("engine-skills-off");
+    const bare = makeOrigin(root);
+    const dir = path.join(root, "kb");
+    cloneWorkdir(bare, dir);
+    const home = path.join(root, "home");
+    write(dir, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n\n步骤\n");
+
+    refreshOrgSkills(
+      { ...mkConfig(bare, dir), skills: false },
+      new Logger(path.join(root, "log")),
+      home
+    );
+
+    expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+  });
+
+  it("知识库目录不存在也不抛错（失败隔离）", () => {
+    const root = tmpDir("engine-skills-err");
+    const logFile = path.join(root, "log");
+    expect(() =>
+      refreshOrgSkills(
+        { ...mkConfig("u", path.join(root, "nope")) },
+        new Logger(logFile),
+        path.join(root, "home")
+      )
+    ).not.toThrow();
   });
 });
 

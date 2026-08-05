@@ -158,6 +158,42 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库索引");
   }, 40000);
 
+  it("新增团队 skill 后守护进程自动分发到 ~/.claude/skills", async () => {
+    const kb = path.join(root, "kb");
+    const init = spawnSync(
+      "node",
+      [CLI, "init", bare, "--dir", kb, "--interval", "3600"],
+      { encoding: "utf8", env: envFor() }
+    );
+    expect(init.status).toBe(0);
+
+    daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
+
+    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
+    const started = await waitFor(() => {
+      try {
+        return !!JSON.parse(fs.readFileSync(statePath, "utf8")).lastCycleAt;
+      } catch {
+        return false;
+      }
+    }, 10000);
+    expect(started).toBe(true);
+
+    // 知识库里新增一个 skill → 监听触发同步周期 → 周期末分发到 ~/.claude/skills。
+    // 这条用例专门证明 refreshOrgSkills 真的被挂进了 runCycle：光测
+    // refreshOrgSkills 本身（见 sync-engine.test.ts）测不出「有没有被调用」。
+    fs.mkdirSync(path.join(kb, "skills", "demo"), { recursive: true });
+    fs.writeFileSync(
+      path.join(kb, "skills", "demo", "SKILL.md"),
+      "---\nname: demo\ndescription: d\n---\n\n步骤\n"
+    );
+
+    const skillMd = path.join(home, ".claude", "skills", "org-demo", "SKILL.md");
+    const distributed = await waitFor(() => fs.existsSync(skillMd), 15000);
+    expect(distributed).toBe(true);
+    expect(fs.readFileSync(skillMd, "utf8")).toContain("name: org-demo");
+  }, 40000);
+
   it("暂停期间仍刷新提示词索引（刷新不碰 git，与 pause 语义无关）", async () => {
     const kb = path.join(root, "kb");
     const init = spawnSync(

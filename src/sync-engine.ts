@@ -14,6 +14,7 @@ import {
 import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
+import { syncSkills } from "./skills-sync.js";
 import { PushGate } from "./push-gate.js";
 
 export interface SyncDeps {
@@ -310,6 +311,48 @@ export function refreshAgentPrompts(
 }
 
 /**
+ * 每个同步周期末把知识库 skills/ 分发到 ~/.claude/skills。
+ *
+ * 与 refreshAgentPrompts 一样：纯本地读 + 写本机 ~/.claude/，不碰 git，
+ * 因此不受 .knowbase-pause 影响；任何异常只记日志，不能影响 SyncResult /
+ * DaemonState，也不能让守护进程退出。
+ *
+ * 与 refreshAgentPrompts 的**刻意不同**：这里没有 onlyExisting 语义。
+ * 提示词区块在用户的个人文件里，删掉它是「别往我提示词里塞东西」最自然的
+ * 表达，所以后台从不重建；而删掉 ~/.claude/skills/org-foo/ 会连标记一起
+ * 删掉，「记住用户拒绝过这一个」需要引入新的持久化状态，而 opt-out 在配置层
+ * 已经有了（--no-skills）。所以托管副本删掉后下个周期会被重新分发。
+ * 这是单向下发 + 静默覆盖的直接推论，不是 bug，别顺手「修」掉。
+ */
+export function refreshOrgSkills(
+  cfg: Config,
+  logger: Logger,
+  home?: string
+): void {
+  if (cfg.skills === false) return;
+  try {
+    const changes = syncSkills(cfg.dir, home);
+    const done = changes.filter(
+      (c) => c.action === "created" || c.action === "updated" || c.action === "removed"
+    );
+    if (done.length > 0) {
+      logger.log(
+        `团队 skills 已更新：${done.map((c) => `${c.target}(${c.action})`).join(", ")}`
+      );
+    }
+    for (const c of changes) {
+      if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {
+        logger.log(`团队 skill ${c.name} 未分发（${c.action}）：${c.reason}`);
+      }
+    }
+  } catch (e) {
+    logger.log(
+      `分发团队 skills 失败（已忽略）：${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+}
+
+/**
  * 守护进程主体：混合调度。
  * - 上行加速：文件监听 + 防抖（静默 quietMs 触发，maxWaitMs 封顶防饿死），
  *   本地一有改动几秒内即推送，缩小多设备并发编辑的冲突窗口。
@@ -361,6 +404,7 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
       logger.log(`守护循环异常（已捕获）：${state.lastError}`);
     }
     refreshAgentPrompts(cfg, logger);
+    refreshOrgSkills(cfg, logger);
   };
 
   // 上行监听（可通过配置 watch:false 关闭；不支持递归监听的平台自动退化）
