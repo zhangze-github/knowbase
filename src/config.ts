@@ -61,6 +61,16 @@ export function daemonStatePath(): string {
   return path.join(configDir(), "daemon.state.json");
 }
 
+/** push 熔断状态快照（写入 DaemonState 供 status 展示）。 */
+export interface PushBlocked {
+  /** 首次判定无权限的时刻（ISO）。 */
+  since: string;
+  /** 服务端给出的原因原文（单行）。 */
+  reason: string;
+  /** 下一次自动探测的时刻（ISO）。 */
+  nextProbeAt: string;
+}
+
 /** 守护进程心跳状态：CLI 与守护进程之间无 IPC，靠这个文件传递健康度。 */
 export interface DaemonState {
   pid: number;
@@ -74,6 +84,8 @@ export interface DaemonState {
   /** 最近一次周期的错误说明（网络失败等）。 */
   lastError?: string;
   paused?: boolean;
+  /** 无 push 权限而熔断时存在；恢复后清空。 */
+  pushBlocked?: PushBlocked;
 }
 
 export function writeDaemonState(state: DaemonState): void {
