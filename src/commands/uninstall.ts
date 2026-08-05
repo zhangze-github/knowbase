@@ -50,11 +50,25 @@ export function cmdUninstall(): number {
 
   // 移除分发到 ~/.claude/skills 的团队 skills 副本（无托管标记的目录一律不碰）
   try {
-    const removed = uninstallSkills().filter((r) => r.removed);
+    const removals = uninstallSkills();
+    const removed = removals.filter((r) => r.removed);
     if (removed.length > 0) {
       console.log(
         `• 已从 ~/.claude/skills 移除团队 skills ${removed.length} 个：` +
           removed.map((r) => r.target).join(", ")
+      );
+    }
+    // removed === false 是**真的删失败了**（与 uninstallAgentConfig 的
+    // removed: false 语义相反，见 SkillRemoval 的注释），绝不能静默过滤掉：
+    // 这份团队 skill 仍会被 Claude Code 加载，而配置马上就被删掉、status 也
+    // 不再工作，用户再没有入口能发现它。
+    for (const r of removals) {
+      if (r.removed) continue;
+      console.warn(
+        `⚠ 未能移除 ~/.claude/skills/${r.target}：${r.error ?? "未知原因"}`
+      );
+      console.warn(
+        "  该团队 skill 仍会被 Claude Code 加载，请手动删除这个目录（通常是权限问题）。"
       );
     }
   } catch (e) {

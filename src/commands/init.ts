@@ -256,6 +256,16 @@ export function cmdInit(url: string, opts: InitOptions): number {
       } else if (changes.length === 0) {
         console.log("• 知识库暂无 skills/ 目录，跳过团队 skills 分发");
       }
+      // removed 也要打印：静默删掉一个副本是「知识库里已经没有这个 skill 了」
+      // 的唯一可见信号，不打印用户只会发现 skill 莫名消失（agent-config 那边连
+      // unchanged 都会打印「已是最新」，这里更不该沉默）。
+      const gone = changes.filter((c) => c.action === "removed");
+      if (gone.length > 0) {
+        console.log(
+          `• 已撤下知识库中已删除的团队 skills ${gone.length} 个：` +
+            gone.map((c) => c.target).join(", ")
+        );
+      }
       for (const c of changes) {
         if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {
           console.warn(`⚠ skill ${c.name} 未分发：${c.reason}`);

@@ -125,6 +125,7 @@ skills/deploy/SKILL.md      ──►    ~/.claude/skills/org-deploy/SKILL.md   
 - **单向下发，托管副本是只读产物**：在 `~/.claude/skills/org-*/` 里手改**不会**回写知识库，下个同步周期会被静默覆盖（实现上是给每个副本单独算一份内容哈希，一旦跟落盘时的哈希对不上就判定「本机被动过」，触发重装）。想改一个团队 skill，去改知识库里的 `skills/` 目录，改动会通过正常的知识库同步扩散给所有人。
 - **删掉 `~/.claude/skills/org-xxx/` 目录不是退订**：下个周期它会被原样重新分发——这与「删掉 agent 提示词里的托管区块就不再刷新」刻意不同，因为 skill 目录一删连托管标记都没了，没有地方记住「这个人拒绝过」。真要关闭，用 `knowbase init --no-skills` 接入，或在 `~/.config/knowbase/config.json` 里把 `"skills"` 设为 `false`。
 - **同名保护**：如果你本机的 `~/.claude/skills/org-x` 不是 knowbase 建的（目录里没有 `.knowbase.json` 托管标记），一律不会被覆盖或删除。`knowbase status` 会把这种情况列成一条提示，并以非零退出码提醒你——通常改个名字，下一周期就能收到团队版。
+- **`name` 与 `description` 都是硬要求**：缺任一字段（或 `description` 为空）的 skill 会被跳过、不分发，`knowbase status` 里会列出原因。Claude Code 靠 `description` 判断何时触发一个 skill，缺了它等于分发一个装死的 skill，而团队会以为流程已经生效。
 - **只对 Claude Code 生效**：Codex 没有 skills 目录机制，这条分发链路不涉及 `~/.codex/`。
 - `knowbase uninstall` 会清掉所有带托管标记的团队 skill 副本，你自己的 skill（无论是否叫 `org-*`）原样保留。
 

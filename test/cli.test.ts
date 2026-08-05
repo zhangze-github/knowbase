@@ -315,9 +315,12 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
     const dayOne = knowbase(["status"]);
     expect(dayOne.out).toContain("知识库暂无 skills/ 目录");
-    // 「需要注意」汇总里不得出现 skills（否则每个还没建 skills/ 的新团队 status 永久非零退出）
+    // 「需要注意」汇总里不得出现 skill 相关异常（否则每个还没建 skills/ 的新团队
+    // status 永久非零退出、把拿退出码做监控的包装脚本永久标红）。贴着代码实际
+    // 能 push 的文案「团队 skill <name> 未分发」断言——匹配 "skills" 判别力不够，
+    // 那个异常文案是单数，压根撞不上。
     const attention = dayOne.out.split("需要注意：")[1] ?? "";
-    expect(attention).not.toContain("skills");
+    expect(attention).not.toContain("团队 skill");
 
     // 关闭
     expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
@@ -347,6 +350,41 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.readFileSync(path.join(own, "SKILL.md"), "utf8")).toContain("我自己写的");
   });
 
+  it("知识库里删掉 skill 后重跑 init：撤下副本这件事必须打印出来", () => {
+    // 静默删掉一个副本一个字不打印，用户只会发现 skill 莫名消失
+    // （agent-config 那边连 unchanged 都会打印「已是最新」）。
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "init-removed");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
+
+    fs.rmSync(path.join(kb, "skills", "demo"), { recursive: true });
+    const again = knowbase(["init", bare, "--dir", kb]);
+    expect(again.code).toBe(0);
+    expect(again.out).toContain("已撤下");
+    expect(again.out).toContain("org-demo");
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(false);
+  });
+
+  it("悬空软链占位 org-demo 时 status 也报未覆盖并非零退出", () => {
+    // status 曾用 fs.existsSync 自己重算一遍 foreign，而 existsSync **跟随**软链、
+    // 分发侧的 readExistingTargets **不跟随**：一条悬空软链会让 syncSkills 永久
+    // 判 foreign（分发被彻底阻塞），而 status 打印「已分发 0 个」、不计入需要注意。
+    // status 存在的唯一理由就是给这套静默机制提供可见性，判定分叉等于没有。
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "status-dangling");
+    const skillsHome = path.join(home, ".claude", "skills");
+    fs.mkdirSync(skillsHome, { recursive: true });
+    fs.symlinkSync(path.join(root, "nowhere"), path.join(skillsHome, "org-demo"));
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const s = knowbase(["status"]);
+    expect(s.out).toContain("未覆盖");
+    expect(s.code).toBe(1);
+    // 无标记一律不碰：软链原样留着
+    expect(fs.lstatSync(path.join(skillsHome, "org-demo")).isSymbolicLink()).toBe(true);
+  });
+
   it("uninstall 移除托管 skills 副本，保留用户自己的 skill", () => {
     const kb = path.join(root, "kb");
     seedRemoteSkill("demo", "uninst-skill");
@@ -360,6 +398,27 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(knowbase(["uninstall"]).code).toBe(0);
     expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(false);
     expect(fs.readFileSync(path.join(mine, "SKILL.md"), "utf8")).toContain("私人");
+  });
+
+  it("uninstall 删不掉副本时明确报出来，不谎报成功", () => {
+    // 删除失败而 uninstall 一个字都不打印，是最糟的组合：配置已删、status 也不再
+    // 工作，这份仍被 Claude Code 加载的团队 skill 再没有任何入口能被发现。
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "uninst-fail");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const skillsHome = path.join(home, ".claude", "skills");
+    expect(fs.existsSync(path.join(skillsHome, "org-demo"))).toBe(true);
+
+    fs.chmodSync(skillsHome, 0o500); // r-x：目录内条目不可删
+    try {
+      const u = knowbase(["uninstall"]);
+      expect(u.out).toContain("未能移除");
+      expect(u.out).toContain("org-demo");
+      expect(fs.existsSync(path.join(skillsHome, "org-demo"))).toBe(true);
+    } finally {
+      // 改回可写，否则 afterEach 清理临时目录会失败
+      fs.chmodSync(skillsHome, 0o755);
+    }
   });
 
   it("零字节 index.md → 区块回退文案与 status 口径一致", () => {

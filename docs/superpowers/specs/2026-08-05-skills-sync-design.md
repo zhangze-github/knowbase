@@ -48,7 +48,7 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 
 - `<kb>/skills/` 不存在 → 整功能 no-op，不报错（与根 `index.md` 缺失同样处理）。
 - 只扫**一级**子目录。不含 `SKILL.md` 的子目录忽略（可能是误放的素材目录）。
-- `SKILL.md` 必须有 YAML frontmatter 且含 `name:` 字段，否则跳过并记日志——那不是一个合法 skill。
+- `SKILL.md` 必须有 YAML frontmatter 且含**非空的 `name:` 与 `description:`** 字段，否则跳过并记日志——那不是一个合法 skill。`description` 与 `name` 同为硬要求：Claude Code 靠 `description` 判断何时触发一个 skill，缺了它就永远不会被用上，等于分发了一个装死的 skill，而团队会以为流程已经生效。挡在源侧比事后排查便宜得多（只校验一个字段而文档写两个，是更糟的组合）。
 - 目录名必须匹配 `^[A-Za-z0-9][A-Za-z0-9._-]*$`。不合规跳过并记日志。
 - 一批源中出现仅大小写不同的名字（`Foo` 与 `foo`）时，取排序后第一个并记一次告警。理由与 [索引注入设计 §4.1](2026-08-04-kb-index-injection-design.md) 相同：macOS 大小写不敏感、Linux 敏感，不定死取值会产生「同一知识库在不同成员机器上行为不同」的极难排查问题。
 
@@ -101,6 +101,12 @@ Claude Code 原生支持 `~/.claude/skills/<name>/SKILL.md` 形态的个人 skil
 
 再反向扫一遍：`~/.claude/skills/` 下所有含 `.knowbase.json` 的目录，其 `source` 不在当前源列表中 → `orphan`，删除。覆盖「知识库里删了 skill」与「重命名了 skill」两种情况。
 
+**但校验没通过的源必须先从这次反向扫描里排除**。`readSkillSources` 把 frontmatter 坏掉的源归入 `invalid` 并从 `sources` 中剔除，而反向扫描只认「不在 `sources` 里」——不排除的话，一个成员把 `skills/deploy/SKILL.md` 弄坏（本仓库对 `*.md` 开了 `merge=union`，`skills/*/SKILL.md` 也匹配，并发编辑同一个 skill 产出重复行 frontmatter 是可预期的），全团队机器上已经装好的 `org-deploy` 会被判成孤儿删掉：一个格式错误让所有人丢掉一个能用的 skill。**「保留上一份好副本」严格优于「删掉」**：源不在 `sources` 里就不会被更新，副本原样躺着；源修好后哈希与 `marker.hash` 不同 → 自然判 `update`，自愈。
+
+实现上由 `readSkillSources` 额外返回 `protectedTargets`（`invalid` 条目中目录名合法、算得出 target 的那些；目录名不合法的算不出 target，也就不可能有对应副本），`syncSkills` 把它作为第三个参数传给 `planSkills`，反向扫描时跳过。`planSkills` 仍是零 fs 访问的纯函数。
+
+`orphan` 的删除**必须先于** `create` / `update` 执行。只改大小写的重命名（`skills/foo` → `skills/Foo`）得到的计划是 `[create org-Foo, orphan org-foo]`，而在大小写不敏感的文件系统（macOS 默认 APFS）上这两个名字是同一个目录：先装后删会把刚装好的副本删掉，该 skill 在磁盘上消失一整个周期。其余场景两种顺序等价（同一个 target 不会同时出现在两类动作里）。
+
 同时清理残留的 `*.knowbase-tmp-*` 目录，**但只清 pid 已不存活的那些**。临时目录名带 pid 正是为了让守护进程的周期刷新与用户手跑的 `init` 能并发写同一目标；若无差别清理，就把这个设计整个抵消了——一方正在拷贝、另一方把它的临时目录删掉，接着前者 `rmSync(finalDir)` 成功（删掉后者刚装好的副本）、`rename` 拿到 ENOENT 报错，净结果是该 skill 在磁盘上消失一个周期。
 
 ### 7.1 写入方式：临时目录 + rename
@@ -122,7 +128,7 @@ rename 临时目录 → org-<name>/
 拷贝规则：
 
 - **跳过 `.git`**（防御性：正常的 org-kb 里 skill 目录下不会有嵌套仓库）。
-- **保留可执行位**。skill 可以带脚本；丢了 `+x` 脚本就跑不起来，而这种失败在 agent 侧极难定位。其余权限位不保留，按默认 umask 落盘。
+- **保留可执行位**。skill 可以带脚本；丢了 `+x` 脚本就跑不起来，而这种失败在 agent 侧极难定位。其余权限位随 `copyFileSync` 带上源文件的完整 mode（实测源 `0600` → 副本 `0600`）；拷完仍显式 `chmod +x` 一次，是为了不依赖各平台 `copyFile` 的 mode 语义。实际影响可忽略：git 只跟踪 x 位，检出即 644/755。
 - **不跟随软链**：遇到软链跳过并记日志。git 会存软链，而一条指向作者机器路径的软链拷到别人机器上必然悬空——静默留一条坏链比缺一个文件更难查。
 
 ## 8. 集成点
@@ -203,3 +209,18 @@ skills 这边相反：删掉 `~/.claude/skills/org-foo/`，下个周期会被重
 • 团队 skills：已分发 4 个（org-*）
   ⚠ 跳过 org-deploy：同名目录不是 knowbase 托管的，未覆盖
 ```
+
+已分发数、foreign 名单**必须直接取 `planSkills` 的判定结果**，不得在 status 里另算一遍。曾经的实现用 `sources.filter(...) + fs.existsSync` 重算 foreign，而 `fs.existsSync` **跟随**软链、`readExistingTargets` **不跟随**：`~/.claude/skills/org-a` 是一条悬空软链时，`syncSkills` 永久判 `foreign`（分发被彻底阻塞），status 却打印「已分发 0 个」且不计入「需要注意」——status 存在的唯一理由就是给这套静默机制提供可见性，判定一分叉就等于没有。`planSkills` 是纯函数，status 调它不破坏「status 只读」这条约束。
+
+「知识库还没有 `skills/` 目录」**绝不计入 anomalies**：这是每个团队 day one 的正常状态，计入会让 `status` 永久非零退出，把拿退出码做监控的包装脚本永久标红（与根 `index.md` 缺失同一口径）。
+
+`uninstall` 侧有一处同类的可见性要求：`SkillRemoval.removed === false` 的含义是**「`rmSync` 真的失败了、副本还在磁盘上」**，与 `AgentConfigRemoval.removed === false`（「本来就没有区块」，无害 no-op）**语义相反**。形状一样含义相反，照抄 agent-config 的打印惯例（`if (r.removed) console.log(...)`）就会让 uninstall 在删除失败时一个字都不打印、退出码 0——而配置随即被删、`status` 也不再工作，用户再没有入口能发现这份仍被 Claude Code 加载的团队 skill。因此 `SkillRemoval` 带 `error?: string`，`uninstall` 对 `!removed` 的条目 `console.warn` 出目录名与原因。
+
+## 14. 已知限制
+
+- **`skills/*/SKILL.md` 也吃 `merge=union`**。init 往知识库种入的 `.gitattributes` 是 `*.md merge=union`，这条规则同样命中 `skills/<name>/SKILL.md`。后果：两个成员并发编辑同一个 skill 时**不会**产出冲突副本，而是把两边的行拼起来——frontmatter 可能出现重复的 `name:` / `description:` 行，正文可能出现重复段落，然后这个拼接结果被原样分发给全团队。
+
+  当前只记录、不改种入逻辑：`.gitattributes` 的种入行为影响所有既有仓库（已接入的成员那边规则已经落库并推送），排除 `skills/` 是一个需要用户拍板的设计决定，不是实现细节。缓解措施是上面 §5 的源侧校验（frontmatter 坏到 `name`/`description` 取不出来时整条跳过并保留上一份好副本，而不是把垃圾分发下去）与 `status` 里的跳过提示。
+
+- **托管副本有一个同步周期的过期窗口**（拷贝分发的固有代价，见 §3）。
+- **不做 per-skill 开关**（见 §2）。

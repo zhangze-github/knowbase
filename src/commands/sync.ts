@@ -1,7 +1,14 @@
 import { loadConfig, Logger } from "../config.js";
 import { syncOnce } from "../sync-engine.js";
 
-/** `knowbase sync`：前台立即跑一次同步周期，输出过程。 */
+/**
+ * `knowbase sync`：前台立即跑一次同步周期，输出过程。
+ *
+ * **刻意不做**的两件事：不刷新 agent 提示词、不分发团队 skills（设计文档 §9.2）。
+ * `sync` 是排查 git 同步用的命令，顺手改用户的 `~/.claude/` 是意外副作用；
+ * 守护进程在一个周期内也会补上。别顺手在这里加 refreshAgentPrompts /
+ * refreshOrgSkills——那不是补漏，是扩大这条命令的作用范围。
+ */
 export function cmdSync(): number {
   const cfg = loadConfig();
   const logger = new Logger();

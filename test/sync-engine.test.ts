@@ -23,6 +23,29 @@ import {
   allowPush,
 } from "./helpers.js";
 
+/**
+ * 让 syncSkills 按需抛一次错，用来验证 refreshOrgSkills 的失败隔离。
+ *
+ * 必须用模块 mock：syncSkills 内部处处 catch（readSkillSources / readExistingTargets
+ * / cleanTmpDirs / 每个 skill 的落盘都各自吞异常），构造不出让它真的抛出来的场景，
+ * 所以「知识库目录不存在也不抛错」那种写法是恒真断言——把 refreshOrgSkills 的
+ * try/catch 整个删掉照样全绿。默认透传真实实现，只在置了标志的那条用例里抛。
+ */
+const skillsMock = vi.hoisted(() => ({ throwOnce: false }));
+vi.mock("../src/skills-sync.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/skills-sync.js")>();
+  return {
+    ...actual,
+    syncSkills: (...args: Parameters<typeof actual.syncSkills>) => {
+      if (skillsMock.throwOnce) {
+        skillsMock.throwOnce = false;
+        throw new Error("模拟 syncSkills 抛错");
+      }
+      return actual.syncSkills(...args);
+    },
+  };
+});
+
 let root: string;
 let bare: string;
 let logger: Logger;
@@ -343,9 +366,12 @@ describe("refreshOrgSkills", () => {
     expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
   });
 
-  it("知识库目录不存在也不抛错（失败隔离）", () => {
+  it("syncSkills 抛错时吞掉异常并记日志，不向外抛（失败隔离）", () => {
+    // 照 refreshAgentPrompts 那条「写入失败时吞掉异常并记日志」的写法：真造一次
+    // 失败并断言日志。只断言「不抛错」是恒真的——见文件头 skillsMock 的注释。
     const root = tmpDir("engine-skills-err");
     const logFile = path.join(root, "log");
+    skillsMock.throwOnce = true;
     expect(() =>
       refreshOrgSkills(
         { ...mkConfig("u", path.join(root, "nope")) },
@@ -353,6 +379,8 @@ describe("refreshOrgSkills", () => {
         path.join(root, "home")
       )
     ).not.toThrow();
+    expect(skillsMock.throwOnce).toBe(false); // 确实被调用到了
+    expect(fs.readFileSync(logFile, "utf8")).toContain("分发团队 skills 失败");
   });
 });
 

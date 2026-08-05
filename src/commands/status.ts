@@ -13,7 +13,12 @@ import {
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
 import { readIndex, INDEX_MAX_BYTES } from "../agent-config.js";
-import { readExistingTargets, readSkillSources, skillsHomeDir } from "../skills-sync.js";
+import {
+  planSkills,
+  readExistingTargets,
+  readSkillSources,
+  skillsHomeDir,
+} from "../skills-sync.js";
 
 /** 递归扫描冲突副本（跳过 .git / node_modules，限制深度防止巨树卡顿）。 */
 function findConflictCopies(dir: string, depth = 0, acc: string[] = []): string[] {
@@ -176,26 +181,34 @@ export function cmdStatus(): number {
   if (cfg.skills === false) {
     console.log("团队 skills：已关闭（init 时用了 --no-skills）");
   } else {
-    const { sources, invalid } = readSkillSources(cfg.dir);
-    const managed = readExistingTargets(skillsHomeDir()).filter((e) => e.marker);
-    if (sources.length === 0 && managed.length === 0) {
+    // 直接复用 planSkills 的判定，不在这里另算一遍：status 曾用
+    // `sources.filter(...) + fs.existsSync` 重算 foreign，而 existsSync **跟随**
+    // 软链、readExistingTargets **不跟随**，于是「org-a 是条悬空软链」这种
+    // 分发被永久阻塞的状态在 status 里完全看不见（还会打印「已分发 0 个」了事）。
+    // status 存在的唯一理由就是给这套静默机制提供可见性，判定分叉就等于没有。
+    // planSkills 是纯函数、零 fs 写入，status 保持只读这条约束不受影响。
+    const { sources, invalid, protectedTargets } = readSkillSources(cfg.dir);
+    const existing = readExistingTargets(skillsHomeDir());
+    const plan = planSkills(sources, existing, protectedTargets);
+    const delivered = plan.filter(
+      (c) => c.action === "created" || c.action === "updated" || c.action === "unchanged"
+    ).length;
+    if (sources.length === 0 && existing.every((e) => !e.marker)) {
       // 不计入 anomalies：knowbase 不播种 skills/，「还没有团队 skill」
       // 是每个团队 day one 的正常状态。
       console.log("团队 skills：已启用；知识库暂无 skills/ 目录");
     } else {
-      console.log(`团队 skills：已分发 ${managed.length} 个（org-*），源 ${sources.length} 个`);
+      console.log(`团队 skills：已分发 ${delivered} 个（org-*），源 ${sources.length} 个`);
     }
     for (const c of invalid) {
       console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
       anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
     }
-    const foreign = sources.filter(
-      (s) => !managed.some((m) => m.target === s.target) && fs.existsSync(path.join(skillsHomeDir(), s.target))
-    );
-    for (const s of foreign) {
-      console.log(`  ⚠ 跳过 ${s.target}：同名目录不是 knowbase 托管的，未覆盖`);
+    for (const c of plan) {
+      if (c.action !== "foreign") continue;
+      console.log(`  ⚠ 跳过 ${c.target}：${c.reason}`);
       anomalies.push(
-        `团队 skill ${s.name} 未分发：~/.claude/skills/${s.target} 是你自己的目录，未覆盖；改名后即可收到团队版`
+        `团队 skill ${c.name} 未分发：~/.claude/skills/${c.target} 不是 knowbase 托管的，未覆盖；改名后即可收到团队版`
       );
     }
   }

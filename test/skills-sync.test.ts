@@ -12,6 +12,7 @@ import {
   hashSkillDir,
   readSkillSources,
   dedupeByTargetCase,
+  collisionReason,
   planSkills,
   syncSkills,
   uninstallSkills,
@@ -214,12 +215,73 @@ describe("readSkillSources", () => {
   it("目录名非法 → invalid", () => {
     const kb = tmpDir("skills-src3");
     seedSkill(kb, "good");
-    write(kb, "skills/.hidden/SKILL.md", "---\nname: x\n---\n");
+    write(kb, "skills/.hidden/SKILL.md", "---\nname: x\ndescription: d\n---\n");
     const r = readSkillSources(kb);
     expect(r.sources.map((s) => s.name)).toEqual(["good"]);
     expect(r.invalid.map((c) => c.name)).toEqual([".hidden"]);
   });
 
+  it("缺 description（或为空、或只出现在正文）→ invalid", () => {
+    // README 与托管区块文案都写「需含 name / description」，实现必须一致地拦住：
+    // 没有 description，Claude Code 永远不会触发这个 skill——等于分发了一个装死的
+    // skill，而团队会以为流程已经生效。失败早于分发比事后排查便宜得多。
+    const kb = tmpDir("skills-src4");
+    seedSkill(kb, "good");
+    write(kb, "skills/no-desc/SKILL.md", "---\nname: no-desc\n---\n\n步骤\n");
+    write(kb, "skills/empty-desc/SKILL.md", "---\nname: empty-desc\ndescription:   \n---\n\n步骤\n");
+    // 正文里的 description: 不算——扫描上界必须是 frontmatter 结束行
+    write(kb, "skills/body-desc/SKILL.md", "---\nname: body-desc\n---\n\ndescription: 正文里的\n");
+
+    const r = readSkillSources(kb);
+    expect(r.sources.map((s) => s.name)).toEqual(["good"]);
+    expect(r.invalid.map((c) => c.name).sort()).toEqual([
+      "body-desc",
+      "empty-desc",
+      "no-desc",
+    ]);
+    for (const c of r.invalid) expect(c.reason).toContain("description");
+  });
+
+  it("org- 前缀导致完全同名时，原因文案不能说成「仅大小写不同」", () => {
+    // skills/deploy 与 skills/org-deploy 的 target 都是 org-deploy（prefixedName
+    // 不重复加前缀）。dedupe 只留一个是对的，但理由必须说清是前缀撞车。
+    const kb = tmpDir("skills-src5");
+    seedSkill(kb, "deploy");
+    seedSkill(kb, "org-deploy");
+
+    const r = readSkillSources(kb);
+    expect(r.sources.map((s) => s.name)).toEqual(["deploy"]);
+    expect(r.invalid.map((c) => c.name)).toEqual(["org-deploy"]);
+    expect(r.invalid[0].reason).toContain("前缀");
+    expect(r.invalid[0].reason).not.toContain("大小写");
+  });
+
+  it("坏源的 target 进入 protectedTargets，目录名非法的不进", () => {
+    // 目录名非法算不出 target，也就不可能有对应副本，进保护集合毫无意义；
+    // 目录名合法的必须进——否则反向扫描会把已装好的副本当孤儿删掉。
+    const kb = tmpDir("skills-src6");
+    write(kb, "skills/broken/SKILL.md", "# 没有 frontmatter\n");
+    write(kb, "skills/.hidden/SKILL.md", "---\nname: x\ndescription: d\n---\n");
+
+    const r = readSkillSources(kb);
+    expect(r.sources).toEqual([]);
+    expect(r.protectedTargets).toEqual(["org-broken"]);
+  });
+});
+
+describe("collisionReason", () => {
+  it("仅大小写不同 → 说大小写", () => {
+    // 大小写碰撞在 APFS 上无法用真实目录构造（两个名字就是同一个目录），
+    // 只能这样测——与 dedupeByTargetCase 抽成纯函数是同一个理由。
+    expect(collisionReason("afoo", "Afoo")).toContain("仅大小写不同");
+  });
+
+  it("加 org- 前缀后同名 → 说前缀，并指出该去改哪个目录", () => {
+    const r = collisionReason("org-deploy", "deploy");
+    expect(r).toContain("前缀");
+    expect(r).toContain("skills/deploy");
+    expect(r).not.toContain("大小写");
+  });
 });
 
 describe("dedupeByTargetCase", () => {
@@ -333,6 +395,18 @@ describe("planSkills", () => {
       [{ target: "org-foo", marker: mk("org-foo", "h1", "c1"), copyHash: "c1" }]
     );
     expect(p).toEqual([{ name: "org-foo", target: "org-foo", action: "removed" }]);
+  });
+
+  it("受保护的 target 不判 removed（源坏了，上一份好副本必须留住）", () => {
+    const existing = [
+      { target: "org-a", marker: mk("a", "h1", "c1"), copyHash: "c1" },
+    ];
+    // 不传保护集合：源真的没了 → 删。这一半是对照，缺了就分不清是否真的生效。
+    expect(planSkills([], existing)).toEqual([
+      { name: "a", target: "org-a", action: "removed" },
+    ]);
+    // 源还在知识库里、只是本轮校验没过（frontmatter 被弄坏之类）→ 一个字都不动
+    expect(planSkills([], existing, ["org-a"])).toEqual([]);
   });
 
   it("无标记且不在源列表中 → 完全不出现在计划里（用户自己的 skill）", () => {
@@ -626,6 +700,54 @@ describe("syncSkills", () => {
     expect(fs.readFileSync(path.join(skills, "org-mine", "SKILL.md"), "utf8")).toContain("私人");
   });
 
+  it("源 SKILL.md 被弄坏 → 副本原样保留（不删！），源修好后自动更新", () => {
+    // 本仓库对 *.md 开了 merge=union，skills/*/SKILL.md 也匹配，并发编辑同一个
+    // skill 产出重复行 frontmatter 是可预期的。坏掉的源会落进 invalid、从 sources
+    // 里消失，如果反向扫描只认「不在 sources 里」，就会把全团队机器上已经装好的
+    // 副本判成孤儿删掉——一个格式错误让所有人丢掉一个能用的 skill。
+    // 「保留上一份好副本」严格优于「删掉」：源不在 sources 里就不会被更新，副本
+    // 原样躺着；源修好后哈希与 marker.hash 不同 → 自然 updated，自愈。
+    const kb = tmpDir("sync17-kb");
+    const { home, skills } = fakeHome("sync17-home");
+    seedSkill(kb, "deploy", "老步骤\n");
+    expect(syncSkills(kb, home).map((c) => c.action)).toEqual(["created"]);
+
+    const dest = path.join(skills, "org-deploy");
+    const mdSrc = path.join(kb, "skills/deploy/SKILL.md");
+    fs.writeFileSync(mdSrc, "并发合并把 frontmatter 弄坏了\n老步骤\n");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action)).toEqual(["invalid"]);
+    expect(changes.some((c) => c.action === "removed")).toBe(false);
+    expect(fs.existsSync(dest)).toBe(true);
+    expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).toContain("老步骤");
+
+    // 源修好 → 自愈，副本被更新到新内容
+    fs.writeFileSync(mdSrc, "---\nname: deploy\ndescription: d\n---\n\n新步骤\n");
+    expect(syncSkills(kb, home).map((c) => c.action)).toEqual(["updated"]);
+    const fixed = fs.readFileSync(path.join(dest, "SKILL.md"), "utf8");
+    expect(fixed).toContain("新步骤");
+    expect(fixed).toContain("name: org-deploy");
+  });
+
+  it("只改大小写的重命名后副本立即存在（removed 先于 created 执行）", () => {
+    // skills/foo → skills/Foo 的 plan 是 [created org-Foo, removed org-foo]，
+    // 而在大小写不敏感的文件系统（macOS 默认 APFS）上这两个名字是同一个目录：
+    // 先装后删会把刚装好的副本删掉，~/.claude/skills 直接空掉一个周期。
+    const kb = tmpDir("sync18-kb");
+    const { home, skills } = fakeHome("sync18-home");
+    seedSkill(kb, "foo");
+    syncSkills(kb, home);
+
+    fs.renameSync(path.join(kb, "skills/foo"), path.join(kb, "skills/Foo"));
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => c.action).sort()).toEqual(["created", "removed"]);
+
+    const dest = path.join(skills, "org-Foo");
+    expect(fs.existsSync(dest)).toBe(true);
+    expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).toContain("name: org-Foo");
+  });
+
   it("~/.claude/skills/org-a 是普通文件而非目录 → 判为 foreign，不被删除覆盖", () => {
     // M3：readExistingTargets 若按「不是目录就跳过」过滤，这种目标会从
     // existing 里消失，导致 planSkills 误判 created，installSkill 再对一个
@@ -659,20 +781,51 @@ describe("uninstallSkills", () => {
     ]);
     expect(fs.existsSync(path.join(skills, "org-a"))).toBe(false);
     expect(fs.existsSync(path.join(skills, "org-b"))).toBe(false);
+    // 这两条断言分工不同，都要留着：
+    // - my-own（不带 org- 前缀）判别力弱（readExistingTargets 从不返回非 org-
+    //   条目），它防的是「uninstall 图省事直接清空整个 ~/.claude/skills」这类
+    //   粗暴实现——那种实现不违反任何 org- 边界，只有这条能抓到。
+    // - org-handmade 才是扛「org- 前缀内、无标记一律不碰」这条不变式的用例。
     expect(fs.existsSync(path.join(skills, "my-own", "SKILL.md"))).toBe(true);
     expect(fs.readFileSync(path.join(skills, "org-handmade", "SKILL.md"), "utf8")).toContain(
       "手写"
     );
   });
 
-  it("目标目录不存在 → 空结果、不抛错", () => {
-    const { home } = fakeHome("uninst-empty");
+  it("目标目录不存在 → 空结果、不抛错，且不凭空创建 ~/.claude/skills", () => {
+    const { home, skills } = fakeHome("uninst-empty");
     expect(uninstallSkills(home)).toEqual([]);
+    expect(fs.existsSync(skills)).toBe(false);
+  });
+
+  it("删除失败 → removed:false 并带出原因，副本仍在", () => {
+    // removed:false 在这里的含义是「rmSync 真的失败了」（与 AgentConfigRemoval
+    // 语义相反），调用方必须能看见原因，否则 uninstall 会谎报成功。
+    const kb = tmpDir("uninst-fail-kb");
+    const { home, skills } = fakeHome("uninst-fail-home");
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+
+    fs.chmodSync(skills, 0o500); // r-x：目录内条目不可删
+    try {
+      const removals = uninstallSkills(home);
+      expect(removals).toHaveLength(1);
+      expect(removals[0].target).toBe("org-a");
+      expect(removals[0].removed).toBe(false);
+      expect(removals[0].error).toBeTruthy();
+      expect(fs.existsSync(path.join(skills, "org-a"))).toBe(true);
+    } finally {
+      // 改回可写，否则临时目录清理会失败
+      fs.chmodSync(skills, 0o755);
+    }
   });
 
   it("顺手清掉残留临时目录", () => {
     const { home, skills } = fakeHome("uninst-tmp");
-    write(skills, `org-x${TMP_SUFFIX}12345/SKILL.md`, "半成品\n");
+    // 424242 而非 12345：macOS 的 pid 会回绕，12345 完全可能是个存活进程，
+    // 而活 pid 的临时目录按设计必须保留（见 cleanTmpDirs 注释），会偶发变红。
+    // 与 sync7 用例同一处理。
+    write(skills, `org-x${TMP_SUFFIX}424242/SKILL.md`, "半成品\n");
     uninstallSkills(home);
     expect(fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX))).toEqual([]);
   });

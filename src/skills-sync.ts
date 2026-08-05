@@ -211,25 +211,83 @@ export function dedupeByTargetCase(sources: SkillSource[]): {
 }
 
 /**
+ * 目标名撞车时给用户看的原因。两种碰撞必须分开说：
+ *
+ * - **仅大小写不同**（`afoo` 与 `Afoo`）：目标名只差大小写。
+ * - **加前缀后完全同名**（`deploy` 与 `org-deploy`）：`prefixedName` 对已带前缀的
+ *   名字不重复加前缀，两者的 target 都是 `org-deploy`，这不是大小写问题。
+ *   这个场景很现实：成员在 skill 列表里看到 `org-deploy`，把
+ *   `~/.claude/skills/org-deploy` 整个拷回知识库想「贡献修改」，结果排序上
+ *   `deploy` < `org-deploy`，他新加的那份被静默丢掉——此时告诉他「仅大小写
+ *   不同」他只会更困惑，得直接告诉他去改哪个目录。
+ *
+ * 抽成纯函数的理由与 `dedupeByTargetCase` 相同：「仅大小写不同的两个源目录并存」
+ * 在大小写不敏感的文件系统（macOS 默认 APFS）上无法落盘构造，只能这样测。
+ */
+export function collisionReason(name: string, winner: string): string {
+  if (name.toLowerCase() === winner.toLowerCase()) {
+    return `与 ${winner} 仅大小写不同，已跳过`;
+  }
+  return (
+    `加上 ${ORG_PREFIX} 前缀后与 ${winner} 同名，已跳过` +
+    `（改团队版请直接编辑 ${SKILLS_SUBDIR}/${winner}）`
+  );
+}
+
+/**
+ * 取 frontmatter 里某个顶层字段的原始值；无 frontmatter / 无该字段返回 null。
+ *
+ * 只做「有没有这一行」这种最粗的判断，不解析 YAML：knowbase 的职责是分发，
+ * 不是 lint。`description: >` 这种折叠写法在这里会被视为「有值」，正确——
+ * 真正的值在下面几行缩进里，不是我们该管的事。
+ */
+function frontmatterField(md: string, key: string): string | null {
+  const lines = md.split("\n");
+  if (lines[0]?.trimEnd() !== "---") return null;
+  const re = new RegExp(`^${key}:\\s*(.*)$`);
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
+    if (line === "---") return null; // frontmatter 结束，正文里的同名行不算
+    const m = re.exec(line);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+/**
  * 扫描 <kbDir>/skills 下的一级子目录，校验并计算哈希。
  * skills/ 不存在时返回空结果、绝不抛错——大多数团队 day one 还没有这个目录。
+ *
+ * protectedTargets：invalid 条目中「目录名合法、算得出托管副本名」的那批 target。
+ * 交给 planSkills 在反向扫描时跳过，语义是**「保留上一份好副本」严格优于「删掉」**：
+ * 一个成员把 skills/deploy/SKILL.md 的 frontmatter 弄坏（本仓库对 *.md 开了
+ * merge=union，并发编辑同一个 skill 产出重复行 frontmatter 是可预期的），
+ * deploy 会落进 invalid、从 sources 里消失，若不保护，反向扫描会把全团队机器上
+ * 已经装好的 org-deploy 判成孤儿删掉——一个格式错误让所有人丢掉一个能用的 skill。
+ * 保护之后副本原样躺着（源不在 sources 里也就不会被更新），源修好后哈希与
+ * marker.hash 不同、自然判 updated，自愈。
+ * 目录名不合法的算不出 target，也就不可能有对应副本，无需保护。
  */
 export function readSkillSources(kbDir: string): {
   sources: SkillSource[];
   invalid: SkillChange[];
+  protectedTargets: string[];
 } {
   const root = path.join(kbDir, SKILLS_SUBDIR);
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(root, { withFileTypes: true });
   } catch {
-    return { sources: [], invalid: [] };
+    return { sources: [], invalid: [], protectedTargets: [] };
   }
 
   const sources: SkillSource[] = [];
   const invalid: SkillChange[] = [];
-  const bad = (name: string, reason: string): void => {
+  const protectedTargets: string[] = [];
+  /** target 传 null 表示目录名不合法（不可能有对应副本，不进保护集合）。 */
+  const bad = (name: string, reason: string, target: string | null): void => {
     invalid.push({ name, target: "", action: "invalid", reason });
+    if (target) protectedTargets.push(target);
   };
 
   for (const e of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
@@ -237,7 +295,7 @@ export function readSkillSources(kbDir: string): {
     const name = e.name;
     const target = prefixedName(name);
     if (!target) {
-      bad(name, "目录名不合法（只允许 A-Za-z0-9 开头，含 . _ -）");
+      bad(name, "目录名不合法（只允许 A-Za-z0-9 开头，含 . _ -）", null);
       continue;
     }
     const dir = path.join(root, name);
@@ -246,26 +304,38 @@ export function readSkillSources(kbDir: string): {
     try {
       md = fs.readFileSync(mdPath, "utf8");
     } catch {
-      bad(name, "缺少 SKILL.md");
+      bad(name, "缺少 SKILL.md", target);
       continue;
     }
     if (rewriteSkillName(md, target) === null) {
-      bad(name, "SKILL.md 缺少 frontmatter 或 name 字段");
+      bad(name, "SKILL.md 缺少 frontmatter 或 name 字段", target);
+      continue;
+    }
+    // description 与 name 一样是硬要求：Claude Code 靠 description 判断何时触发
+    // 一个 skill，没有它就永远不会被用上——分发一个装死的 skill 比不分发更糟，
+    // 因为团队会以为流程已经生效。挡在源侧比事后排查便宜得多。
+    const desc = frontmatterField(md, "description");
+    if (desc === null || desc.trim() === "") {
+      bad(name, "SKILL.md 的 frontmatter 缺少 description 字段（Claude Code 靠它触发 skill）", target);
       continue;
     }
     let hash: string;
     try {
       hash = hashSkillDir(dir);
     } catch (err) {
-      bad(name, `读取失败：${err instanceof Error ? err.message : String(err)}`);
+      bad(name, `读取失败：${err instanceof Error ? err.message : String(err)}`, target);
       continue;
     }
     sources.push({ name, dir, target, hash });
   }
 
   const { kept, dropped } = dedupeByTargetCase(sources);
-  for (const d of dropped) bad(d.name, `与 ${d.winner} 仅大小写不同，已跳过`);
-  return { sources: kept, invalid };
+  for (const d of dropped) {
+    // dedupeByTargetCase 的输入全部来自上面 prefixedName 非 null 的分支，
+    // 这里再算一次必然拿到同一个值（避免为了带出 target 改动它的返回形状）。
+    bad(d.name, collisionReason(d.name, d.winner), prefixedName(d.name));
+  }
+  return { sources: kept, invalid, protectedTargets };
 }
 
 export interface SkillMarker {
@@ -301,11 +371,13 @@ export interface ExistingTarget {
  */
 export function planSkills(
   sources: SkillSource[],
-  existing: ExistingTarget[]
+  existing: ExistingTarget[],
+  protectedTargets: readonly string[] = []
 ): SkillChange[] {
   const changes: SkillChange[] = [];
   const byTarget = new Map(existing.map((e) => [e.target, e]));
   const wanted = new Set<string>();
+  const kept = new Set(protectedTargets);
 
   for (const s of sources) {
     wanted.add(s.target);
@@ -337,9 +409,15 @@ export function planSkills(
 
   // 反向扫：托管副本的源已不在列表中 → 孤儿。覆盖「知识库里删了 skill」与
   // 「重命名了 skill」两种情况。
+  //
+  // protectedTargets 里的不算孤儿：它们的源还在知识库里，只是本轮校验没通过
+  // （frontmatter 坏了之类），副本原样留着等源修好，见 readSkillSources 的注释。
+  // 「源目录真的被删了」与「源目录还在但内容坏了」必须区分，否则一个格式错误
+  // 就会让全团队丢掉一个能用的 skill。
   for (const e of existing) {
     if (!e.marker) continue;
     if (wanted.has(e.target)) continue;
+    if (kept.has(e.target)) continue;
     changes.push({ name: e.marker.source, target: e.target, action: "removed" });
   }
 
@@ -465,8 +543,11 @@ function installSkill(src: SkillSource, skillsHome: string): void {
       const to = path.join(tmp, rel);
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.copyFileSync(from, to);
-      // 只搬可执行位，其余权限位按默认 umask。skill 可以带脚本，丢了 +x
-      // 脚本就跑不起来，而这种失败在 agent 侧极难定位。
+      // copyFileSync 实际会把源文件的完整 mode 带到副本上（实测源 0600 → 副本
+      // 0600），这里再显式补一次 +x 不是为了「只搬可执行位」，而是不依赖各平台
+      // copyFile 的 mode 语义：skill 可以带脚本，丢了 +x 脚本就跑不起来，而这种
+      // 失败在 agent 侧极难定位。git 只跟踪 x 位（检出即 644/755），所以副本
+      // 权限位实际就是这两种，没有更细的保真需求。
       if ((fs.statSync(from).mode & 0o111) !== 0) fs.chmodSync(to, 0o755);
     }
 
@@ -508,7 +589,7 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
   const skillsHome = skillsHomeDir(home);
   cleanTmpDirs(skillsHome);
 
-  const { sources, invalid } = readSkillSources(kbDir);
+  const { sources, invalid, protectedTargets } = readSkillSources(kbDir);
   const existing = readExistingTargets(skillsHome);
   // 这段不改变行为：sources 和 existing 都空时 planSkills 必然返回空数组，
   // 往下走一样得到 invalid 本身。它不是「不凭空创建 ~/.claude/skills」的安全
@@ -516,11 +597,21 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
   // 意图写明，省得读代码的人得看完整个循环才确认这点。别在别处依赖这行当兜底。
   if (sources.length === 0 && existing.length === 0) return invalid;
 
-  const plan = planSkills(sources, existing);
+  const plan = planSkills(sources, existing, protectedTargets);
   const byTarget = new Map(sources.map((s) => [s.target, s]));
   const out: SkillChange[] = [...invalid];
 
-  for (const c of plan) {
+  // removed 必须先于 created/updated 执行。只改大小写的重命名（skills/foo →
+  // skills/Foo）会得到 [created org-Foo, removed org-foo]，而在大小写不敏感的
+  // 文件系统（macOS 默认 APFS）上这两个名字是同一个目录：先装后删会把刚装好的
+  // 副本删掉，~/.claude/skills 里那个 skill 直接消失，要等下一周期才恢复。
+  // 其余场景下两种顺序等价（同一个 target 不会同时出现在两类动作里）。
+  const ordered = [
+    ...plan.filter((c) => c.action === "removed"),
+    ...plan.filter((c) => c.action !== "removed"),
+  ];
+
+  for (const c of ordered) {
     if (c.action === "unchanged" || c.action === "foreign") {
       out.push(c);
       continue;
@@ -554,7 +645,19 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
 
 export interface SkillRemoval {
   target: string;
+  /**
+   * 是否真的删掉了。
+   *
+   * **注意与 `AgentConfigRemoval.removed` 的语义相反**：那边 `false` 表示
+   * 「文件里本来就没有托管区块」——一个无害的 no-op，真正的失败靠抛异常传递；
+   * 这里 `false` 表示「rmSync 失败了，副本还在磁盘上」——必须让用户看见，
+   * 否则 uninstall 会谎报成功，而配置已删、status 也不再工作，用户再没有
+   * 入口能删掉这份仍被 Claude Code 加载的团队 skill。
+   * 两个类型形状一样含义相反，照抄对方的打印惯例就会出这个 bug。
+   */
   removed: boolean;
+  /** removed 为 false 时的失败原因（权限、目录被占用等）。 */
+  error?: string;
 }
 
 /**
@@ -570,8 +673,12 @@ export function uninstallSkills(home: string = os.homedir()): SkillRemoval[] {
     try {
       fs.rmSync(path.join(skillsHome, e.target), { recursive: true, force: true });
       removals.push({ target: e.target, removed: true });
-    } catch {
-      removals.push({ target: e.target, removed: false });
+    } catch (err) {
+      removals.push({
+        target: e.target,
+        removed: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   return removals;
