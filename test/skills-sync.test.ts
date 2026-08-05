@@ -456,11 +456,33 @@ describe("syncSkills", () => {
     const kb = tmpDir("sync7-kb");
     const { home, skills } = fakeHome("sync7-home");
     seedSkill(kb, "a");
-    write(skills, `org-a${TMP_SUFFIX}99999/SKILL.md`, "半成品\n");
+    // 424242 而非 99999：99999 在 macOS 上恰好是 PID_MAX，理论上可能真的被
+    // 某个进程占用，会让这条测试偶发变红；424242 超出常见 pid 上限，稳妥。
+    write(skills, `org-a${TMP_SUFFIX}424242/SKILL.md`, "半成品\n");
 
     syncSkills(kb, home);
     const left = fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX));
     expect(left).toEqual([]);
+  });
+
+  it("cleanTmpDirs 只清 pid 已不存活的临时目录，活 pid 的原样保留", () => {
+    // I1 的回归护栏：sync7 只验证「死 pid 被清」，无差别删除的旧实现在那条
+    // 用例下同样是绿的，测不出「活 pid 必须被保留」这条不变式。这里用测试
+    // 进程自己的 pid（process.pid，必然存活）构造一个 tmp 目录，混一个用不
+    // 可能存在的 pid 构造的死目录，断言前者原样保留、后者被清。
+    const kb = tmpDir("sync-pidgate-kb");
+    const { home, skills } = fakeHome("sync-pidgate-home");
+    fs.mkdirSync(skills, { recursive: true });
+
+    const liveName = `org-ghost${TMP_SUFFIX}${process.pid}`;
+    const deadName = `org-ghost${TMP_SUFFIX}999999999`;
+    write(skills, `${liveName}/SKILL.md`, "另一进程正在写\n");
+    write(skills, `${deadName}/SKILL.md`, "上次崩溃残留\n");
+
+    syncSkills(kb, home);
+
+    expect(fs.existsSync(path.join(skills, liveName))).toBe(true);
+    expect(fs.existsSync(path.join(skills, deadName))).toBe(false);
   });
 
   it("保留可执行位", () => {
