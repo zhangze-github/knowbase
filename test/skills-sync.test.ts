@@ -17,8 +17,9 @@ import {
   syncSkills,
   uninstallSkills,
   skillTargets,
+  summarizeByTool,
 } from "../src/skills-sync.js";
-import type { SkillSource, SkillMarker } from "../src/skills-sync.js";
+import type { SkillSource, SkillMarker, SkillChange } from "../src/skills-sync.js";
 
 describe("prefixedName", () => {
   it("正常名字加前缀", () => {
@@ -824,6 +825,63 @@ describe("syncSkills", () => {
     expect(changes.map((c) => c.action)).toEqual(["foreign"]);
     expect(fs.readFileSync(path.join(skills, "org-a"), "utf8")).toBe("我是个文件，不是目录\n");
   });
+
+  it("装了 Codex：双目标各得一份带独立标记的副本，tool 归属正确", () => {
+    const kb = tmpDir("sync-codex-kb");
+    const { home, skills } = fakeHome("sync-codex-home");
+    fs.mkdirSync(path.join(home, ".codex"));
+    seedSkill(kb, "a");
+
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => [c.tool, c.action]).sort()).toEqual([
+      ["Claude Code", "created"],
+      ["Codex", "created"],
+    ]);
+
+    for (const dest of [
+      path.join(skills, "org-a"),
+      path.join(home, ".codex", "skills", "org-a"),
+    ]) {
+      expect(fs.readFileSync(path.join(dest, "SKILL.md"), "utf8")).toContain("name: org-a");
+      expect(fs.existsSync(path.join(dest, MARKER_NAME))).toBe(true);
+    }
+  });
+
+  it("装了 Codex：源删除后两个目标的副本都被撤下", () => {
+    const kb = tmpDir("sync-codex-rm-kb");
+    const { home, skills } = fakeHome("sync-codex-rm-home");
+    fs.mkdirSync(path.join(home, ".codex"));
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+
+    fs.rmSync(path.join(kb, "skills", "a"), { recursive: true });
+    const changes = syncSkills(kb, home);
+    expect(changes.map((c) => [c.tool, c.action]).sort()).toEqual([
+      ["Claude Code", "removed"],
+      ["Codex", "removed"],
+    ]);
+    expect(fs.existsSync(path.join(skills, "org-a"))).toBe(false);
+    expect(fs.existsSync(path.join(home, ".codex", "skills", "org-a"))).toBe(false);
+  });
+
+  it("一个目标写入失败不影响另一目标（目标级隔离）", () => {
+    const kb = tmpDir("sync-isolate-kb");
+    const { home, skills } = fakeHome("sync-isolate-home");
+    seedSkill(kb, "a");
+    // ~/.codex/skills 预先建成只读：cleanTmpDirs/readExistingTargets 能读，
+    // installSkill 写临时目录时 EACCES → 该目标落 failed
+    fs.mkdirSync(path.join(home, ".codex", "skills"), { recursive: true });
+    fs.chmodSync(path.join(home, ".codex", "skills"), 0o500);
+    try {
+      const changes = syncSkills(kb, home);
+      const byTool = new Map(changes.map((c) => [c.tool, c.action]));
+      expect(byTool.get("Claude Code")).toBe("created");
+      expect(byTool.get("Codex")).toBe("failed");
+      expect(fs.existsSync(path.join(skills, "org-a", "SKILL.md"))).toBe(true);
+    } finally {
+      fs.chmodSync(path.join(home, ".codex", "skills"), 0o755);
+    }
+  });
 });
 
 describe("uninstallSkills", () => {
@@ -890,6 +948,42 @@ describe("uninstallSkills", () => {
     write(skills, `org-x${TMP_SUFFIX}424242/SKILL.md`, "半成品\n");
     uninstallSkills(home);
     expect(fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX))).toEqual([]);
+  });
+
+  it("装了 Codex：两个目标的托管副本都清掉，tool/path 字段齐全", () => {
+    const kb = tmpDir("uninst-codex-kb");
+    const { home, skills } = fakeHome("uninst-codex-home");
+    fs.mkdirSync(path.join(home, ".codex"));
+    seedSkill(kb, "a");
+    syncSkills(kb, home);
+
+    const removals = uninstallSkills(home);
+    expect(removals.map((r) => [r.tool, r.target, r.removed]).sort()).toEqual([
+      ["Claude Code", "org-a", true],
+      ["Codex", "org-a", true],
+    ]);
+    for (const r of removals) {
+      expect(r.path.endsWith(path.join(r.tool === "Codex" ? ".codex" : ".claude", "skills", "org-a"))).toBe(true);
+      expect(fs.existsSync(r.path)).toBe(false);
+    }
+  });
+});
+
+describe("summarizeByTool", () => {
+  const c = (tool: string | undefined, target: string): SkillChange =>
+    ({ name: target, target, action: "created", ...(tool ? { tool } : {}) }) as SkillChange;
+
+  it("按 tool 分组，组间分号、组内顿号", () => {
+    expect(
+      summarizeByTool(
+        [c("Claude Code", "org-a"), c("Claude Code", "org-b"), c("Codex", "org-a")],
+        (x) => `${x.target}(${x.action})`
+      )
+    ).toBe("Claude Code org-a(created)、org-b(created)；Codex org-a(created)");
+  });
+
+  it("tool 为空的条目不带组名前缀", () => {
+    expect(summarizeByTool([c(undefined, "org-a")], (x) => x.target)).toBe("org-a");
   });
 });
 

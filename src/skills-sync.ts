@@ -175,8 +175,35 @@ export interface SkillChange {
   /** 托管副本目录名。invalid 时为空串。 */
   target: string;
   action: SkillAction;
+  /**
+   * 目标工具展示名（skillTargets 的 name）。readSkillSources 产出的 invalid
+   * 条目不设：源侧问题不属于任何目标。
+   */
+  tool?: string;
   /** invalid / foreign / failed 的原因，用于日志与 status。 */
   reason?: string;
+}
+
+/**
+ * 把变更按目标工具分组渲染成一行摘要：组间分号、组内顿号，如
+ * 「Claude Code org-a(created)、org-b(updated)；Codex org-a(created)」。
+ * tool 为空的条目（invalid）不带组名前缀。sync-engine 与 init 的日志共用，
+ * 避免两处各写一套分组后格式漂移。
+ */
+export function summarizeByTool(
+  changes: SkillChange[],
+  render: (c: SkillChange) => string
+): string {
+  const groups = new Map<string, string[]>();
+  for (const c of changes) {
+    const key = c.tool ?? "";
+    const arr = groups.get(key) ?? [];
+    arr.push(render(c));
+    groups.set(key, arr);
+  }
+  return [...groups.entries()]
+    .map(([tool, items]) => (tool ? `${tool} ${items.join("、")}` : items.join("、")))
+    .join("；");
 }
 
 /**
@@ -656,30 +683,42 @@ function installSkill(src: SkillSource, skillsHome: string): void {
 }
 
 /**
- * 把知识库 skills/ 分发到 ~/.claude/skills/。init 与守护进程每周期共用。
- * 单个 skill 失败记为 failed 并继续下一个：一个坏 skill 不该拖垮整批分发。
+ * 把知识库 skills/ 分发到所有生效目标（见 skillTargets）。init 与守护进程
+ * 每周期共用。源只读一次——扫描、校验、大小写去重与目标无关；invalid 条目
+ * 与目标无关，不落 tool。单个 skill 失败记为 failed 并继续下一个：一个坏
+ * skill 不该拖垮整批分发；单个目标整体不可用同样不影响其他目标（该目标的
+ * 条目各自落 failed，其余目标照常）。
  */
 export function syncSkills(kbDir: string, home: string = os.homedir()): SkillChange[] {
-  const skillsHome = skillsHomeDir(home);
-  cleanTmpDirs(skillsHome);
-
   const { sources, invalid, protectedTargets } = readSkillSources(kbDir);
+  const out: SkillChange[] = [...invalid];
+  for (const t of skillTargets(home)) {
+    out.push(...syncSkillsToTarget(sources, protectedTargets, t));
+  }
+  return out;
+}
+
+function syncSkillsToTarget(
+  sources: SkillSource[],
+  protectedTargets: readonly string[],
+  target: SkillTarget
+): SkillChange[] {
+  const skillsHome = target.dir;
+  cleanTmpDirs(skillsHome);
   const existing = readExistingTargets(skillsHome);
-  // 这段不改变行为：sources 和 existing 都空时 planSkills 必然返回空数组，
-  // 往下走一样得到 invalid 本身。它不是「不凭空创建 ~/.claude/skills」的安全
-  // 网——那个由下面 install 分支里单独出现的 mkdirSync 保证，这里只是提前把
-  // 意图写明，省得读代码的人得看完整个循环才确认这点。别在别处依赖这行当兜底。
-  if (sources.length === 0 && existing.length === 0) return invalid;
+  // sources 和 existing 都空时 planSkills 必然返回空数组，这里只是提前把意图
+  // 写明。它不是「不凭空创建 skills 目录」的安全网——那个由 install 分支里的
+  // mkdirSync 位置保证。别在别处依赖这行当兜底。
+  if (sources.length === 0 && existing.length === 0) return [];
 
   const plan = planSkills(sources, existing, protectedTargets);
   const byTarget = new Map(sources.map((s) => [s.target, s]));
-  const out: SkillChange[] = [...invalid];
+  const out: SkillChange[] = [];
 
   // removed 必须先于 created/updated 执行。只改大小写的重命名（skills/foo →
   // skills/Foo）会得到 [created org-Foo, removed org-foo]，而在大小写不敏感的
   // 文件系统（macOS 默认 APFS）上这两个名字是同一个目录：先装后删会把刚装好的
-  // 副本删掉，~/.claude/skills 里那个 skill 直接消失，要等下一周期才恢复。
-  // 其余场景下两种顺序等价（同一个 target 不会同时出现在两类动作里）。
+  // 副本删掉。其余场景下两种顺序等价。
   const ordered = [
     ...plan.filter((c) => c.action === "removed"),
     ...plan.filter((c) => c.action !== "removed"),
@@ -687,16 +726,14 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
 
   for (const c of ordered) {
     if (c.action === "unchanged" || c.action === "foreign") {
-      out.push(c);
+      out.push({ ...c, tool: target.name });
       continue;
     }
     try {
       if (c.action === "removed") {
-        // target 为空串目前走不到这里（invalid 的空 target 是单独收集的，
-        // 从不进入 plan），但这是一行带 rm -rf 的代码：path.join(skillsHome, "")
-        // 等于 skillsHome 本身，一旦调用顺序被改（例如日后有人把 invalid 也
-        // 塞进 plan 里跑一遍），这行就会清空整个 ~/.claude/skills。挡在这里
-        // 让这个不变式靠代码保证，不靠「调用者不会传空 target」的默契。
+        // 这是一行带 rm -rf 的代码：path.join(skillsHome, "") 等于 skillsHome
+        // 本身，空 target 一旦流入就会清空整个 skills 目录。挡在这里让不变式
+        // 靠代码保证，不靠「调用者不会传空 target」的默契。
         if (!c.target) throw new Error("removed 动作缺少合法 target，拒绝执行删除");
         fs.rmSync(path.join(skillsHome, c.target), { recursive: true, force: true });
       } else {
@@ -704,11 +741,12 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
         fs.mkdirSync(skillsHome, { recursive: true });
         installSkill(src, skillsHome);
       }
-      out.push(c);
+      out.push({ ...c, tool: target.name });
     } catch (e) {
       out.push({
         name: c.name,
         target: c.target,
+        tool: target.name,
         action: "failed",
         reason: e instanceof Error ? e.message : String(e),
       });
@@ -719,6 +757,13 @@ export function syncSkills(kbDir: string, home: string = os.homedir()): SkillCha
 
 export interface SkillRemoval {
   target: string;
+  /** 目标工具展示名。 */
+  tool: string;
+  /**
+   * 副本绝对路径。多目标后消费方无法从 target 推出位置，删除失败的
+   * 手动处理提示必须报出确切目录。
+   */
+  path: string;
   /**
    * 是否真的删掉了。
    *
@@ -735,24 +780,29 @@ export interface SkillRemoval {
 }
 
 /**
- * uninstall 时调用：移除所有带托管标记的副本。
+ * uninstall 时调用：移除所有生效目标里带托管标记的副本。
  * 无标记的目录一律不碰——包括用户自己手写的 org-* skill。
+ * ~/.codex 不存在时 Codex 目标不在列（skillTargets 已滤），天然跳过。
  */
 export function uninstallSkills(home: string = os.homedir()): SkillRemoval[] {
-  const skillsHome = skillsHomeDir(home);
-  cleanTmpDirs(skillsHome);
   const removals: SkillRemoval[] = [];
-  for (const e of readExistingTargets(skillsHome)) {
-    if (!e.marker) continue;
-    try {
-      fs.rmSync(path.join(skillsHome, e.target), { recursive: true, force: true });
-      removals.push({ target: e.target, removed: true });
-    } catch (err) {
-      removals.push({
-        target: e.target,
-        removed: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
+  for (const t of skillTargets(home)) {
+    cleanTmpDirs(t.dir);
+    for (const e of readExistingTargets(t.dir)) {
+      if (!e.marker) continue;
+      const abs = path.join(t.dir, e.target);
+      try {
+        fs.rmSync(abs, { recursive: true, force: true });
+        removals.push({ target: e.target, tool: t.name, path: abs, removed: true });
+      } catch (err) {
+        removals.push({
+          target: e.target,
+          tool: t.name,
+          path: abs,
+          removed: false,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
   return removals;
