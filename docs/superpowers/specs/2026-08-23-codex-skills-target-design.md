@@ -18,15 +18,17 @@ knowbase 的 agent 集成一直是双目标的（`agent-config.ts` 同时写 `~/
 - **不做 per-target 开关**。opt-out 仍只有配置层的 `skills: false` 一个总开关，没有「只分发给 Claude 不给 Codex」的机制。Codex 侧的"开关"是安装状态本身（见 §3）。
 - **不新增其他工具**（Cursor 等）。本次只加 Codex；目标数组的结构让未来新增是加一行的事，但那是另一次决策。
 
-## 3. 门控：存在才分发
+## 3. 门控：真实装了 Codex 才分发
 
-Codex 目标仅当 **`~/.codex` 目录存在**时生效；`~/.claude/skills` 维持现状无条件分发。
+Codex 目标仅当 **`~/.codex` 是目录，且目录里存在 `AGENTS.md` 以外的条目**时生效；`~/.claude/skills` 维持现状无条件分发。
 
+- **不能只判断「`~/.codex` 存在」**：knowbase 自己的 `syncAgentConfig` 会给每个用户写 `~/.codex/AGENTS.md`，而 `writeFileAtomic` 内部无条件 `mkdirSync(dirname, {recursive:true})`——任何跑过一次 `knowbase init` 的机器，不管装没装 Codex，`~/.codex` 目录都会被 knowbase 自己造出来。「目录存在」这个信号因此失效：早期设计（见上一版本）用它做门控，导致没装 Codex 的机器也收到 skill 分发（`test/cli.test.ts` 曾在此处回归）。
+- 判断依据改为「目录里有没有 `AGENTS.md` 以外的东西」：真实的 Codex 安装目录里必然还有别的东西（`config.toml` / `sessions/` / `auth.json` 等），knowbase 造出来的空壳里只有 `AGENTS.md` 一个文件。不挑某个具体文件名（如 `config.toml`）判断，是因为那依赖 Codex 的版本细节，全新安装可能还没生成它。
 - 判断 `~/.codex` 而非 `~/.codex/skills`：装了 Codex 但从未建过 skills 目录的机器也该收到分发，`~/.codex/skills` 由安装分支现有的 `mkdirSync` 创建。
-- 判断**存在**而非「是目录」：`~/.codex` 是普通文件属于用户机器的病态状态，此时视为未安装、跳过分发即可，不报错——往一个文件下面 mkdir 只会制造更难解释的错误。
-- 门控每周期动态求值：装 Codex 后下个同步周期自动开始分发，`~/.codex` 消失后自动停止并且**不删已分发的副本**（目录都没了副本自然也没了；若只删 skills 子目录，下周期门控失败不再管它——不为病态状态设计清理路径）。
+- 读取失败（不存在、`EACCES`、`~/.codex` 是普通文件等）一律视为未安装、跳过分发，不报错——判断不出真实安装状态时，保守地不分发比抛异常中断整个同步更安全。
+- 门控每周期动态求值：装 Codex 后下个同步周期自动开始分发，`~/.codex` 消失（或退化成只剩 `AGENTS.md`）后自动停止并且**不删已分发的副本**（目录都没了副本自然也没了；若只删 skills 子目录，下周期门控失败不再管它——不为病态状态设计清理路径）。
 
-选「存在才分发」而非「无条件分发」（与 agent-config 的无条件写入不同）的理由：agent-config 只在 init 跑一次，不写就永远没机会；skills 分发每周期都跑，门控可以自愈，而无条件分发会在没装 Codex 的机器上留一棵永远无人消费的目录树，uninstall 也要多清理一处。
+选「真实装了才分发」而非「无条件分发」（与 agent-config 的无条件写入不同）的理由：agent-config 只在 init 跑一次，不写就永远没机会；skills 分发每周期都跑，门控可以自愈，而无条件分发会在没装 Codex 的机器上留一棵永远无人消费的目录树，uninstall 也要多清理一处。
 
 ## 4. 结构：目标列表参数化
 
@@ -38,7 +40,7 @@ export interface SkillTarget {
   dir: string;
 }
 
-/** 返回当前生效的分发目标。Codex 仅在 ~/.codex 存在时出现。 */
+/** 返回当前生效的分发目标。Codex 仅在真实装了 Codex（见 §3）时出现。 */
 export function skillTargets(home: string = os.homedir()): SkillTarget[]
 ```
 
@@ -70,8 +72,8 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[]
 
 ## 7. status 与 uninstall
 
-- **status**：按目标分别展示分发状态。`~/.codex` 不存在时**不显示 Codex 行**——status 的原则是一屏健康度，没装的工具不是健康问题，不制造噪音。
-- **uninstall**：遍历 `skillTargets()` 返回的每个目标执行现有「只删带标记副本」逻辑，输出带工具名。`~/.codex` 不存在时天然跳过（门控已滤掉）。
+- **status**：按目标分别展示分发状态。未检测到真实 Codex 安装时**不显示 Codex 行**——status 的原则是一屏健康度，没装的工具不是健康问题，不制造噪音。
+- **uninstall**：遍历 `skillTargets()` 返回的每个目标执行现有「只删带标记副本」逻辑，输出带工具名。未检测到真实 Codex 安装时天然跳过（门控已滤掉）。
 
 ## 8. 错误处理
 
@@ -87,7 +89,7 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[]
 
 ## 10. 测试
 
-- `skillTargets` 门控：`~/.codex` 存在 / 不存在 / 是普通文件，三种情况（注入临时 home）。
+- `skillTargets` 门控：`~/.codex` 不存在 / 是普通文件 / 是空目录 / 只有 `AGENTS.md` / 有真实 Codex 标记文件（含与 `AGENTS.md` 并存），共五种情况（注入临时 home）。
 - 双目标分发：同一源在两个 skillsHome 各得一份带独立 marker 的副本，`SKILL.md` 的 `name:` 均被改写。
 - 目标隔离：一个目标安装失败（构造只读 skillsHome），另一目标正常完成且结果条目归属正确。
 - 删除传播：源删除后两个目标的托管副本都被清理。

@@ -198,6 +198,19 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.existsSync(path.join(dest, ".knowbase.json"))).toBe(true);
   });
 
+  it("没装 Codex 的机器上 init 不残留 ~/.codex/skills（knowbase 自建 AGENTS.md 不算装了 Codex）", () => {
+    // 回归用例：init 会自动写 ~/.codex/AGENTS.md（全局提示词），顺带把 ~/.codex
+    // 目录建出来。这不代表这台机器装了 Codex，skillTargets 不该把它当成
+    // Codex 目标——分发到 ~/.codex/skills 会造成没装 Codex 的机器上凭空多出
+    // 一个目录，且永远不会被任何东西清理。
+    const kb = path.join(root, "kb");
+    seedRemoteSkill("demo", "init-no-codex");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    expect(fs.existsSync(path.join(home, ".codex", "AGENTS.md"))).toBe(true);
+    expect(fs.existsSync(path.join(home, ".codex", "skills"))).toBe(false);
+  });
+
   it("--no-skills 跳过分发并持久化为 false", () => {
     const kb = path.join(root, "kb");
     const cfgPath = path.join(home, ".config", "knowbase", "config.json");

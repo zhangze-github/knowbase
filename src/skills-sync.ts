@@ -498,12 +498,25 @@ export interface SkillTarget {
   dir: string;
 }
 
+/** syncAgentConfig 在 ~/.codex 下唯一会写的文件名，判断「真实安装」时要排除它。 */
+const CODEX_SELF_WRITTEN = "AGENTS.md";
+
 /**
- * 当前生效的分发目标。Claude Code 无条件在列；Codex 仅当 ~/.codex 存在且是
- * 目录时在列——判断 ~/.codex 而非 ~/.codex/skills，装了 Codex 但从未建过
- * skills 目录的机器也该收到分发（目录由安装分支的 mkdirSync 创建）。
- * ~/.codex 是普通文件属于病态状态，视为未安装跳过即可，往文件下 mkdir 只会
- * 制造更难解释的错误。
+ * 当前生效的分发目标。Claude Code 无条件在列；Codex 仅当 ~/.codex 是目录、
+ * 且目录里存在 AGENTS.md 以外的条目时在列。
+ *
+ * 不能只判断「~/.codex 存在且是目录」：knowbase 自己的 syncAgentConfig 会给
+ * 每个用户写 ~/.codex/AGENTS.md，而 writeFileAtomic 内部无条件
+ * mkdirSync(dirname, {recursive:true})——也就是说任何跑过一次 knowbase init
+ * 的机器，不管装没装 Codex，~/.codex 目录都会被 knowbase 自己造出来。「目录
+ * 存在」这个信号因此失效，原判断会让从未装过 Codex 的机器也收到 skill 分发。
+ * 真实的 Codex 安装目录里必然还有别的东西（config.toml / sessions / auth.json
+ * 等），knowbase 造出来的空壳里只有 AGENTS.md 一个文件——用「除 AGENTS.md 外
+ * 还有没有别的条目」来分辨两种情况。不挑某个具体文件名（如 config.toml）判断，
+ * 是因为那依赖 Codex 的版本细节，全新安装可能还没生成它。
+ *
+ * 读取失败（不存在、EACCES、~/.codex 是普通文件等）一律当作未安装处理，不抛错：
+ * 判断不出真实安装状态时，保守地不分发比抛异常中断整个同步更安全。
  *
  * 每个同步周期重新求值：装 Codex 后下个周期自动开始分发，无需任何命令。
  * 门控知识只放这一处，四个消费方都从这里取目标（与 agentTargets 同一模式）。
@@ -515,9 +528,10 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[] {
   const codexHome = path.join(home, ".codex");
   let codexInstalled = false;
   try {
-    codexInstalled = fs.statSync(codexHome).isDirectory();
+    const entries = fs.readdirSync(codexHome, { withFileTypes: true });
+    codexInstalled = entries.some((e) => e.name !== CODEX_SELF_WRITTEN);
   } catch {
-    // 不存在即未安装
+    // 不存在 / 不是目录 / 权限错误等，一律视为未安装
   }
   if (codexInstalled) {
     targets.push({ name: "Codex", dir: path.join(codexHome, "skills") });

@@ -373,6 +373,9 @@ describe("refreshOrgSkills", () => {
     cloneWorkdir(bare, dir);
     const home = path.join(root, "home");
     fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    // 光有目录不够（knowbase 自己也会造出这个目录），得放一个真实 Codex
+    // 才会有的文件，skillTargets 才会判定「装了 Codex」
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     write(dir, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n正文\n");
 
     refreshOrgSkills({ ...mkConfig(bare, dir) }, new Logger(path.join(root, "log")), home);

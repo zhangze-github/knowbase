@@ -830,6 +830,9 @@ describe("syncSkills", () => {
     const kb = tmpDir("sync-codex-kb");
     const { home, skills } = fakeHome("sync-codex-home");
     fs.mkdirSync(path.join(home, ".codex"));
+    // 光有目录不够（knowbase 自己也会造出这个目录），得放一个真实 Codex
+    // 才会有的文件，skillTargets 才会判定「装了 Codex」
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     seedSkill(kb, "a");
 
     const changes = syncSkills(kb, home);
@@ -851,6 +854,7 @@ describe("syncSkills", () => {
     const kb = tmpDir("sync-codex-rm-kb");
     const { home, skills } = fakeHome("sync-codex-rm-home");
     fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     seedSkill(kb, "a");
     syncSkills(kb, home);
 
@@ -954,6 +958,7 @@ describe("uninstallSkills", () => {
     const kb = tmpDir("uninst-codex-kb");
     const { home, skills } = fakeHome("uninst-codex-home");
     fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     seedSkill(kb, "a");
     syncSkills(kb, home);
 
@@ -995,18 +1000,44 @@ describe("skillTargets", () => {
     ]);
   });
 
-  it("~/.codex 是目录 → 加入 Codex 目标", () => {
-    const home = tmpDir("targets-codex");
+  it("~/.codex 是普通文件 → 视为未安装，不加入", () => {
+    const home = tmpDir("targets-codex-file");
+    fs.writeFileSync(path.join(home, ".codex"), "不是目录\n");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  });
+
+  it("~/.codex 是空目录 → 未安装，不加入", () => {
+    // 没有任何东西表明 Codex 真的装了——目录本身可能是任何原因造出来的
+    const home = tmpDir("targets-codex-empty");
     fs.mkdirSync(path.join(home, ".codex"));
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  });
+
+  it("~/.codex 只有 AGENTS.md（knowbase 自建的空壳）→ 未安装，不加入", () => {
+    // 这是本次修复要挡住的回归场景：syncAgentConfig 给每个用户写
+    // ~/.codex/AGENTS.md，writeFileAtomic 顺带 mkdirSync 创建了这个目录，
+    // 这不代表机器上真的装了 Codex
+    const home = tmpDir("targets-codex-agents-only");
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "# Codex\n");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  });
+
+  it("~/.codex 有真实 Codex 标记文件 → 加入 Codex 目标", () => {
+    const home = tmpDir("targets-codex-real");
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     expect(skillTargets(home)).toEqual([
       { name: "Claude Code", dir: path.join(home, ".claude", "skills") },
       { name: "Codex", dir: path.join(home, ".codex", "skills") },
     ]);
   });
 
-  it("~/.codex 是普通文件 → 视为未安装，不加入", () => {
-    const home = tmpDir("targets-codex-file");
-    fs.writeFileSync(path.join(home, ".codex"), "不是目录\n");
-    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  it("~/.codex 同时有 AGENTS.md 和真实 Codex 文件 → 加入 Codex 目标", () => {
+    const home = tmpDir("targets-codex-both");
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "# Codex\n");
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code", "Codex"]);
   });
 });
