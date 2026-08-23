@@ -718,7 +718,8 @@ function syncSkillsToTarget(
   // removed 必须先于 created/updated 执行。只改大小写的重命名（skills/foo →
   // skills/Foo）会得到 [created org-Foo, removed org-foo]，而在大小写不敏感的
   // 文件系统（macOS 默认 APFS）上这两个名字是同一个目录：先装后删会把刚装好的
-  // 副本删掉。其余场景下两种顺序等价。
+  // 副本删掉，skills 目录里那个 skill 直接消失，要等下一周期才恢复。
+  // 其余场景下两种顺序等价（同一个 target 不会同时出现在两类动作里）。
   const ordered = [
     ...plan.filter((c) => c.action === "removed"),
     ...plan.filter((c) => c.action !== "removed"),
@@ -731,9 +732,11 @@ function syncSkillsToTarget(
     }
     try {
       if (c.action === "removed") {
-        // 这是一行带 rm -rf 的代码：path.join(skillsHome, "") 等于 skillsHome
-        // 本身，空 target 一旦流入就会清空整个 skills 目录。挡在这里让不变式
-        // 靠代码保证，不靠「调用者不会传空 target」的默契。
+        // target 为空串目前走不到这里（invalid 的空 target 是单独收集的，
+        // 从不进入 plan），但这是一行带 rm -rf 的代码：path.join(skillsHome, "")
+        // 等于 skillsHome 本身，一旦调用顺序被改（例如日后有人把 invalid 也
+        // 塞进 plan 里跑一遍），这行就会清空整个 skills 目录。挡在这里让这个
+        // 不变式靠代码保证，不靠「调用者不会传空 target」的默契。
         if (!c.target) throw new Error("removed 动作缺少合法 target，拒绝执行删除");
         fs.rmSync(path.join(skillsHome, c.target), { recursive: true, force: true });
       } else {
