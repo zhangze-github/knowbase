@@ -12,7 +12,7 @@ import {
 import * as git from "../git.js";
 import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
-import { syncSkills } from "../skills-sync.js";
+import { syncSkills, summarizeByTool } from "../skills-sync.js";
 
 export interface InitOptions {
   dir?: string;
@@ -249,10 +249,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
         (c) => c.action === "created" || c.action === "updated"
       );
       if (done.length > 0) {
-        console.log(
-          `• 已分发团队 skills ${done.length} 个到 ~/.claude/skills：` +
-            done.map((c) => c.target).join(", ")
-        );
+        console.log(`• 已分发团队 skills：${summarizeByTool(done, (c) => c.target)}`);
       } else if (changes.length === 0) {
         console.log("• 知识库暂无 skills/ 目录，跳过团队 skills 分发");
       }
@@ -261,10 +258,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
       // unchanged 都会打印「已是最新」，这里更不该沉默）。
       const gone = changes.filter((c) => c.action === "removed");
       if (gone.length > 0) {
-        console.log(
-          `• 已撤下知识库中已删除的团队 skills ${gone.length} 个：` +
-            gone.map((c) => c.target).join(", ")
-        );
+        console.log(`• 已撤下知识库中已删除的团队 skills：${summarizeByTool(gone, (c) => c.target)}`);
       }
       for (const c of changes) {
         if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {

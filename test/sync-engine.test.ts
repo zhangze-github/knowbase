@@ -366,6 +366,23 @@ describe("refreshOrgSkills", () => {
     expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
   });
 
+  it("装了 Codex 时同一 skill 也分发到 ~/.codex/skills", () => {
+    const root = tmpDir("engine-skills-codex");
+    const bare = makeOrigin(root);
+    const dir = path.join(root, "kb");
+    cloneWorkdir(bare, dir);
+    const home = path.join(root, "home");
+    fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    write(dir, "skills/demo/SKILL.md", "---\nname: demo\ndescription: d\n---\n正文\n");
+
+    refreshOrgSkills({ ...mkConfig(bare, dir) }, new Logger(path.join(root, "log")), home);
+
+    for (const base of [".claude", ".codex"]) {
+      const md = path.join(home, base, "skills", "org-demo", "SKILL.md");
+      expect(fs.readFileSync(md, "utf8")).toContain("name: org-demo");
+    }
+  });
+
   it("syncSkills 抛错时吞掉异常并记日志，不向外抛（失败隔离）", () => {
     // 照 refreshAgentPrompts 那条「写入失败时吞掉异常并记日志」的写法：真造一次
     // 失败并断言日志。只断言「不抛错」是恒真的——见文件头 skillsMock 的注释。

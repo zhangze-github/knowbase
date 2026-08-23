@@ -17,7 +17,7 @@ import {
   planSkills,
   readExistingTargets,
   readSkillSources,
-  skillsHomeDir,
+  skillTargets,
 } from "../skills-sync.js";
 
 /** 递归扫描冲突副本（跳过 .git / node_modules，限制深度防止巨树卡顿）。 */
@@ -188,33 +188,37 @@ export function cmdStatus(): number {
     // status 存在的唯一理由就是给这套静默机制提供可见性，判定分叉就等于没有。
     // planSkills 是纯函数、零 fs 写入，status 保持只读这条约束不受影响。
     const { sources, invalid, protectedTargets } = readSkillSources(cfg.dir);
-    const existing = readExistingTargets(skillsHomeDir());
-    const plan = planSkills(sources, existing, protectedTargets);
-    // 只数 updated + unchanged，**不含 created**：status 是只读命令，报告的是
-    // 当前状态。created 的含义是「副本还不在盘上、下一次分发才会装」，把它算进
-    // 「已分发」就是虚报——用户在 init 之前跑 status 会看到「已分发 3 个」而磁盘上
-    // 一个都没有。updated 则确实在盘上（只是过期了，Claude Code 正在加载它），算。
-    // 待装的那些由「源 M 个」这个差额体现：看到「已分发 0 个，源 3 个」就知道还没装上。
-    const delivered = plan.filter(
-      (c) => c.action === "updated" || c.action === "unchanged"
-    ).length;
-    if (sources.length === 0 && existing.every((e) => !e.marker)) {
+    const targets = skillTargets();
+    const perTarget = targets.map((t) => ({ t, existing: readExistingTargets(t.dir) }));
+    if (sources.length === 0 && perTarget.every((p) => p.existing.every((e) => !e.marker))) {
       // 不计入 anomalies：knowbase 不播种 skills/，「还没有团队 skill」
       // 是每个团队 day one 的正常状态。
       console.log("团队 skills：已启用；知识库暂无 skills/ 目录");
     } else {
-      console.log(`团队 skills：已分发 ${delivered} 个（org-*），源 ${sources.length} 个`);
-    }
-    for (const c of invalid) {
-      console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
-      anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
-    }
-    for (const c of plan) {
-      if (c.action !== "foreign") continue;
-      console.log(`  ⚠ 跳过 ${c.target}：${c.reason}`);
-      anomalies.push(
-        `团队 skill ${c.name} 未分发：~/.claude/skills/${c.target} 不是 knowbase 托管的，未覆盖；改名后即可收到团队版`
-      );
+      for (const { t, existing } of perTarget) {
+        const plan = planSkills(sources, existing, protectedTargets);
+        // 只数 updated + unchanged，**不含 created**：status 是只读命令，报告的是
+        // 当前状态。created 的含义是「副本还不在盘上、下一次分发才会装」，把它算进
+        // 「已分发」就是虚报——用户在 init 之前跑 status 会看到「已分发 3 个」而磁盘上
+        // 一个都没有。updated 则确实在盘上（只是过期了，Claude Code 正在加载它），算。
+        // 待装的那些由「源 M 个」这个差额体现：看到「已分发 0 个，源 3 个」就知道还没装上。
+        const delivered = plan.filter(
+          (c) => c.action === "updated" || c.action === "unchanged"
+        ).length;
+        console.log(`团队 skills（${t.name}）：已分发 ${delivered} 个（org-*），源 ${sources.length} 个`);
+        for (const c of plan) {
+          if (c.action !== "foreign") continue;
+          console.log(`  ⚠ 跳过 ${c.target}：${c.reason}`);
+          anomalies.push(
+            `团队 skill ${c.name} 未分发：${path.join(t.dir, c.target)} 不是 knowbase 托管的，未覆盖；改名后即可收到团队版`
+          );
+        }
+      }
+      // invalid 是源侧问题，与目标无关，只报一次
+      for (const c of invalid) {
+        console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
+        anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
+      }
     }
   }
 

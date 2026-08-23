@@ -525,11 +525,6 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[] {
   return targets;
 }
 
-/** 托管副本落地目录。只有 Claude Code 有这个机制。 */
-export function skillsHomeDir(home: string = os.homedir()): string {
-  return path.join(home, ".claude", "skills");
-}
-
 /**
  * 读取目标目录现状。
  *

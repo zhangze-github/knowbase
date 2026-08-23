@@ -14,7 +14,7 @@ import {
 import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
-import { syncSkills } from "./skills-sync.js";
+import { syncSkills, summarizeByTool } from "./skills-sync.js";
 import { PushGate } from "./push-gate.js";
 
 export interface SyncDeps {
@@ -311,15 +311,15 @@ export function refreshAgentPrompts(
 }
 
 /**
- * 每个同步周期末把知识库 skills/ 分发到 ~/.claude/skills。
+ * 每个同步周期末把知识库 skills/ 分发到所有生效目标（skillTargets）。
  *
- * 与 refreshAgentPrompts 一样：纯本地读 + 写本机 ~/.claude/，不碰 git，
+ * 与 refreshAgentPrompts 一样：纯本地读 + 写本机 ~/.claude/、~/.codex/，不碰 git，
  * 因此不受 .knowbase-pause 影响；任何异常只记日志，不能影响 SyncResult /
  * DaemonState，也不能让守护进程退出。
  *
  * 与 refreshAgentPrompts 的**刻意不同**：这里没有 onlyExisting 语义。
  * 提示词区块在用户的个人文件里，删掉它是「别往我提示词里塞东西」最自然的
- * 表达，所以后台从不重建；而删掉 ~/.claude/skills/org-foo/ 会连标记一起
+ * 表达，所以后台从不重建；而删掉某个目标里的 org-foo/ 会连标记一起
  * 删掉，「记住用户拒绝过这一个」需要引入新的持久化状态，而 opt-out 在配置层
  * 已经有了（--no-skills）。所以托管副本删掉后下个周期会被重新分发。
  * 这是单向下发 + 静默覆盖的直接推论，不是 bug，别顺手「修」掉。
@@ -336,13 +336,12 @@ export function refreshOrgSkills(
       (c) => c.action === "created" || c.action === "updated" || c.action === "removed"
     );
     if (done.length > 0) {
-      logger.log(
-        `团队 skills 已更新：${done.map((c) => `${c.target}(${c.action})`).join(", ")}`
-      );
+      logger.log(`团队 skills 已更新：${summarizeByTool(done, (c) => `${c.target}(${c.action})`)}`);
     }
     for (const c of changes) {
       if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {
-        logger.log(`团队 skill ${c.name} 未分发（${c.action}）：${c.reason}`);
+        const where = c.tool ? `，${c.tool}` : "";
+        logger.log(`团队 skill ${c.name} 未分发（${c.action}${where}）：${c.reason}`);
       }
     }
   } catch (e) {
