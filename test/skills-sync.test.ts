@@ -16,6 +16,7 @@ import {
   planSkills,
   syncSkills,
   uninstallSkills,
+  skillTargets,
 } from "../src/skills-sync.js";
 import type { SkillSource, SkillMarker } from "../src/skills-sync.js";
 
@@ -889,5 +890,29 @@ describe("uninstallSkills", () => {
     write(skills, `org-x${TMP_SUFFIX}424242/SKILL.md`, "半成品\n");
     uninstallSkills(home);
     expect(fs.readdirSync(skills).filter((n) => n.includes(TMP_SUFFIX))).toEqual([]);
+  });
+});
+
+describe("skillTargets", () => {
+  it("默认只有 Claude Code", () => {
+    const home = tmpDir("targets-none");
+    expect(skillTargets(home)).toEqual([
+      { name: "Claude Code", dir: path.join(home, ".claude", "skills") },
+    ]);
+  });
+
+  it("~/.codex 是目录 → 加入 Codex 目标", () => {
+    const home = tmpDir("targets-codex");
+    fs.mkdirSync(path.join(home, ".codex"));
+    expect(skillTargets(home)).toEqual([
+      { name: "Claude Code", dir: path.join(home, ".claude", "skills") },
+      { name: "Codex", dir: path.join(home, ".codex", "skills") },
+    ]);
+  });
+
+  it("~/.codex 是普通文件 → 视为未安装，不加入", () => {
+    const home = tmpDir("targets-codex-file");
+    fs.writeFileSync(path.join(home, ".codex"), "不是目录\n");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
   });
 });

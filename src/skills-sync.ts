@@ -464,6 +464,40 @@ export function planSkills(
   return changes;
 }
 
+export interface SkillTarget {
+  /** 展示名，用于日志、status、uninstall 输出的归属标注。 */
+  name: string;
+  /** skills 落地目录绝对路径。 */
+  dir: string;
+}
+
+/**
+ * 当前生效的分发目标。Claude Code 无条件在列；Codex 仅当 ~/.codex 存在且是
+ * 目录时在列——判断 ~/.codex 而非 ~/.codex/skills，装了 Codex 但从未建过
+ * skills 目录的机器也该收到分发（目录由安装分支的 mkdirSync 创建）。
+ * ~/.codex 是普通文件属于病态状态，视为未安装跳过即可，往文件下 mkdir 只会
+ * 制造更难解释的错误。
+ *
+ * 每个同步周期重新求值：装 Codex 后下个周期自动开始分发，无需任何命令。
+ * 门控知识只放这一处，四个消费方都从这里取目标（与 agentTargets 同一模式）。
+ */
+export function skillTargets(home: string = os.homedir()): SkillTarget[] {
+  const targets: SkillTarget[] = [
+    { name: "Claude Code", dir: path.join(home, ".claude", "skills") },
+  ];
+  const codexHome = path.join(home, ".codex");
+  let codexInstalled = false;
+  try {
+    codexInstalled = fs.statSync(codexHome).isDirectory();
+  } catch {
+    // 不存在即未安装
+  }
+  if (codexInstalled) {
+    targets.push({ name: "Codex", dir: path.join(codexHome, "skills") });
+  }
+  return targets;
+}
+
 /** 托管副本落地目录。只有 Claude Code 有这个机制。 */
 export function skillsHomeDir(home: string = os.homedir()): string {
   return path.join(home, ".claude", "skills");
