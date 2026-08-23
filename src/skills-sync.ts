@@ -10,8 +10,8 @@ import { pidAlive } from "./config.js";
  * 单向：托管副本是只读分发产物，在 ~/.claude/skills/ 里手改不回写知识库，
  * 下个周期被静默覆盖。贡献路径只有一条——编辑知识库 skills/ 目录。
  *
- * 只对 Claude Code 生效：Codex 没有 skills 目录机制，因此这里不做
- * agent-config.ts 那种多目标抽象。
+ * 分发目标见 skillTargets：Claude Code 无条件，Codex 存在才分发。两端
+ * SKILL.md 格式同构，副本逐字节一致。
  */
 
 /** 知识库中存放 skill 的子目录。 */
