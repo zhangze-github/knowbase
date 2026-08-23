@@ -340,6 +340,31 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(knowbase(["status"]).out).toContain("--no-skills");
   });
 
+  it("status：唯一的 skill 源坏了（缺 description）且盘上无副本 → 报跳过警告、不误判 day one、非零退出", () => {
+    // 回归：day-one 判定原来只看 sources.length === 0，坏源同样会让
+    // sources 变空，与「团队还没建 skills/」这个真正的 day-one 状态无法区分——
+    // 这里构造的是「skills/ 目录确实存在，只是唯一的 skill 因缺 description
+    // 校验没通过」，不该走「暂无 skills/ 目录」这条分支，且必须报出跳过警告、
+    // 非零退出（与基线版本一致）。
+    const kb = path.join(root, "kb");
+    const seed = path.join(root, "seed-status-invalid");
+    g(root, "clone", bare, seed);
+    fs.mkdirSync(path.join(seed, "skills", "demo"), { recursive: true });
+    fs.writeFileSync(
+      path.join(seed, "skills", "demo", "SKILL.md"),
+      "---\nname: demo\n---\n\n缺 description\n"
+    );
+    g(seed, "add", "-A");
+    g(seed, "commit", "-m", "add invalid skill demo");
+    g(seed, "push", "origin", "HEAD:main");
+
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    const s = knowbase(["status"]);
+    expect(s.out).toContain("⚠ 跳过 demo：");
+    expect(s.out).not.toContain("暂无 skills/ 目录");
+    expect(s.code).not.toBe(0);
+  });
+
   it("status 统计已分发的团队 skills 数量", () => {
     const kb = path.join(root, "kb");
     seedRemoteSkill("demo", "status-count");

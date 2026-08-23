@@ -190,7 +190,14 @@ export function cmdStatus(): number {
     const { sources, invalid, protectedTargets } = readSkillSources(cfg.dir);
     const targets = skillTargets();
     const perTarget = targets.map((t) => ({ t, existing: readExistingTargets(t.dir) }));
-    if (sources.length === 0 && perTarget.every((p) => p.existing.every((e) => !e.marker))) {
+    // invalid.length === 0 是必要条件：invalid 非空说明 skills/ 目录确实存在、
+    // 只是里面有坏源（如缺 description），这不是「还没有团队 skill」的 day one
+    // 状态，而是需要人修的异常，「暂无 skills/ 目录」这句话在这种情况下是假的。
+    if (
+      sources.length === 0 &&
+      invalid.length === 0 &&
+      perTarget.every((p) => p.existing.every((e) => !e.marker))
+    ) {
       // 不计入 anomalies：knowbase 不播种 skills/，「还没有团队 skill」
       // 是每个团队 day one 的正常状态。
       console.log("团队 skills：已启用；知识库暂无 skills/ 目录");
@@ -214,11 +221,14 @@ export function cmdStatus(): number {
           );
         }
       }
-      // invalid 是源侧问题，与目标无关，只报一次
-      for (const c of invalid) {
-        console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
-        anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
-      }
+    }
+    // invalid 是源侧问题，与目标无关，只报一次；两个分支（day-one 判定为真/假）
+    // 都要走到这里——day-one 判定为真时 sources 必为空，但 invalid 仍可能非空
+    // （唯一的源坏了），此时仍要报出来，不能因为走了「暂无 skills/ 目录」分支就
+    // 静默吞掉。
+    for (const c of invalid) {
+      console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
+      anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
     }
   }
 

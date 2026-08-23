@@ -5,12 +5,12 @@ import crypto from "node:crypto";
 import { pidAlive } from "./config.js";
 
 /**
- * 把知识库 skills/ 下的 Claude Code skill 单向分发到本机 ~/.claude/skills/。
+ * 把知识库 skills/ 下的 agent skill 单向分发到本机各分发目标（见 skillTargets）。
  *
- * 单向：托管副本是只读分发产物，在 ~/.claude/skills/ 里手改不回写知识库，
- * 下个周期被静默覆盖。贡献路径只有一条——编辑知识库 skills/ 目录。
+ * 单向：托管副本是只读分发产物，在目标目录里手改不回写知识库，下个周期被
+ * 静默覆盖。贡献路径只有一条——编辑知识库 skills/ 目录。
  *
- * 分发目标见 skillTargets：Claude Code 无条件，Codex 存在才分发。两端
+ * 分发目标见 skillTargets：Claude Code 无条件，Codex 真实装了才分发。两端
  * SKILL.md 格式同构，副本逐字节一致。
  */
 
@@ -187,8 +187,12 @@ export interface SkillChange {
 /**
  * 把变更按目标工具分组渲染成一行摘要：组间分号、组内顿号，如
  * 「Claude Code org-a(created)、org-b(updated)；Codex org-a(created)」。
- * tool 为空的条目（invalid）不带组名前缀。sync-engine 与 init 的日志共用，
- * 避免两处各写一套分组后格式漂移。
+ * sync-engine 与 init 的日志共用，避免两处各写一套分组后格式漂移。
+ *
+ * tool 为空的条目不带组名前缀——这不是给 invalid 用的：全部调用点都只传
+ * created/updated/removed，invalid 的 action 是 "invalid"，从不会被传进来。
+ * 这条分支是兜底，保证函数对任何 SkillChange（包括手造的、没设 tool 的）都
+ * total，测试里会直接构造这种输入来验证格式。
  */
 export function summarizeByTool(
   changes: SkillChange[],
@@ -498,28 +502,45 @@ export interface SkillTarget {
   dir: string;
 }
 
-/** syncAgentConfig 在 ~/.codex 下唯一会写的文件名，判断「真实安装」时要排除它。 */
-const CODEX_SELF_WRITTEN = "AGENTS.md";
+/**
+ * 判断「真实装了 Codex」的正向标记：Codex 自己会在 ~/.codex 下产出的条目，
+ * 任意一个存在（文件或目录皆可）即可判定已安装。
+ */
+const CODEX_INSTALL_MARKERS = ["config.toml", "auth.json", "sessions", "history.jsonl", "logs"] as const;
 
 /**
  * 当前生效的分发目标。Claude Code 无条件在列；Codex 仅当 ~/.codex 是目录、
- * 且目录里存在 AGENTS.md 以外的条目时在列。
+ * 且目录里存在至少一个 CODEX_INSTALL_MARKERS 里列出的条目时在列。
  *
- * 不能只判断「~/.codex 存在且是目录」：knowbase 自己的 syncAgentConfig 会给
- * 每个用户写 ~/.codex/AGENTS.md，而 writeFileAtomic 内部无条件
- * mkdirSync(dirname, {recursive:true})——也就是说任何跑过一次 knowbase init
- * 的机器，不管装没装 Codex，~/.codex 目录都会被 knowbase 自己造出来。「目录
- * 存在」这个信号因此失效，原判断会让从未装过 Codex 的机器也收到 skill 分发。
- * 真实的 Codex 安装目录里必然还有别的东西（config.toml / sessions / auth.json
- * 等），knowbase 造出来的空壳里只有 AGENTS.md 一个文件——用「除 AGENTS.md 外
- * 还有没有别的条目」来分辨两种情况。不挑某个具体文件名（如 config.toml）判断，
- * 是因为那依赖 Codex 的版本细节，全新安装可能还没生成它。
+ * 用的是正向识别（白名单已知的 Codex 自产条目），不是反向排除（黑名单
+ * knowbase 自己的产物）。最初版本用的是反向排除——只排除 syncAgentConfig
+ * 写的 ~/.codex/AGENTS.md，理由是「全新安装可能还没生成某个具体文件」。
+ * 这个理由不成立：Codex 从未跑过时 ~/.codex 根本不存在（这个分支在读不到
+ * 目录时已经短路成未安装了）；目录存在就说明 Codex 至少跑过一次，跑过一次
+ * 就会落下这些文件里的至少一个。反向排除真正的问题是 knowbase 在 ~/.codex
+ * 下留下的自产条目集合是开放的、会不断增加，黑名单永远追不上：
+ * - writeFileAtomic（agent-config.ts）失败时的临时文件叫
+ *   AGENTS.md.knowbase-tmp-<pid>，只排除 "AGENTS.md" 挡不住它——进程被
+ *   SIGKILL 杀掉、没走到 rename 那一步，这个临时文件会永久留在磁盘上
+ *   （cleanTmpDirs 只扫 skills 目标目录，不扫 ~/.codex 本身），一次崩溃就把
+ *   一台从未装过 Codex 的机器永久误判为「装了」。
+ * - 这个功能本身会在 ~/.codex 下建 skills/ 子目录（syncSkillsToTarget 的
+ *   mkdirSync(skillsHome)）。黑名单必须把它也排除，否则一旦判定过一次
+ *   「已安装」并分发过，skills/ 目录本身就会让下一周期永远判定为「已安装」——
+ *   即使真实的 Codex 从未存在或已被卸载，也无法退回未安装状态。这是单向
+ *   锁存（latch），直接违反本函数上面「每个同步周期重新求值」的承诺，也
+ *   违反 CHANGELOG 里「卸掉 Codex 后下个周期自动停止」的说法。
+ * - 打开 Finder 看一眼 ~/.codex 就会落下 .DS_Store，同样会被误判。
+ * 用正向标记则没有这个问题：knowbase 自己不会产出任何在
+ * CODEX_INSTALL_MARKERS 里的名字，判定天然不会被自己的副作用污染，也就
+ * 不存在锁存。
  *
  * 读取失败（不存在、EACCES、~/.codex 是普通文件等）一律当作未安装处理，不抛错：
  * 判断不出真实安装状态时，保守地不分发比抛异常中断整个同步更安全。
  *
- * 每个同步周期重新求值：装 Codex 后下个周期自动开始分发，无需任何命令。
- * 门控知识只放这一处，四个消费方都从这里取目标（与 agentTargets 同一模式）。
+ * 每个同步周期重新求值：装 Codex 后下个周期自动开始分发，卸掉后下个周期
+ * 自动停止，无需任何命令。门控知识只放这一处，四个消费方都从这里取目标
+ * （与 agentTargets 同一模式）。
  */
 export function skillTargets(home: string = os.homedir()): SkillTarget[] {
   const targets: SkillTarget[] = [
@@ -529,7 +550,9 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[] {
   let codexInstalled = false;
   try {
     const entries = fs.readdirSync(codexHome, { withFileTypes: true });
-    codexInstalled = entries.some((e) => e.name !== CODEX_SELF_WRITTEN);
+    codexInstalled = entries.some((e) =>
+      (CODEX_INSTALL_MARKERS as readonly string[]).includes(e.name)
+    );
   } catch {
     // 不存在 / 不是目录 / 权限错误等，一律视为未安装
   }
@@ -783,7 +806,7 @@ export interface SkillRemoval {
    * 「文件里本来就没有托管区块」——一个无害的 no-op，真正的失败靠抛异常传递；
    * 这里 `false` 表示「rmSync 失败了，副本还在磁盘上」——必须让用户看见，
    * 否则 uninstall 会谎报成功，而配置已删、status 也不再工作，用户再没有
-   * 入口能删掉这份仍被 Claude Code 加载的团队 skill。
+   * 入口能删掉这份仍被对应工具（见 tool 字段）加载的团队 skill。
    * 两个类型形状一样含义相反，照抄对方的打印惯例就会出这个 bug。
    */
   removed: boolean;

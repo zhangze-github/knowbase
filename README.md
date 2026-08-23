@@ -113,7 +113,7 @@ knowbase status
 
 ## 团队 skill 分发（自动）
 
-知识库不只沉淀散文——写在 `<知识库目录>/skills/<name>/SKILL.md`（需含 `name` / `description` 的 YAML frontmatter）的 agent skill（Claude Code 与 Codex 通用格式），会被自动分发到团队每个成员本机的 `~/.claude/skills/org-<name>/`；装了 Codex（`~/.codex/` 下有 Codex 自己的文件，不是 knowbase 为写全局提示词顺手建的空目录）的机器还会同步分发一份到 `~/.codex/skills/org-<name>/`，装上 Codex 后下个同步周期自动生效，无需任何操作。守护进程每个同步周期检测一次：源变了就更新，删了就撤下，新增就装上。写入区块的准则里也会提示 agent 把「怎么做某件事」的可执行流程沉淀到这里，而不是只写散文（见上一节的托管区块文案）。
+知识库不只沉淀散文——写在 `<知识库目录>/skills/<name>/SKILL.md`（需含 `name` / `description` 的 YAML frontmatter）的 agent skill（Claude Code 与 Codex 通用格式），会被自动分发到团队每个成员本机的 `~/.claude/skills/org-<name>/`；装了 Codex（`~/.codex/` 下存在 `config.toml` / `auth.json` / `sessions` / `history.jsonl` / `logs` 之一——真实 Codex 安装才会产出的条目，不是 knowbase 为写全局提示词顺手建的空目录或它自己留下的临时文件）的机器还会同步分发一份到 `~/.codex/skills/org-<name>/`，装上 Codex 后下个同步周期自动生效，卸掉后下个周期自动停止，无需任何操作。守护进程每个同步周期检测一次：源变了就更新，删了就撤下，新增就装上。写入区块的准则里也会提示 agent 把「怎么做某件事」的可执行流程沉淀到这里，而不是只写散文（见上一节的托管区块文案）。
 
 ```
 知识库                              本机（每个成员）

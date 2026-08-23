@@ -262,7 +262,11 @@ export function cmdInit(url: string, opts: InitOptions): number {
       }
       for (const c of changes) {
         if (c.action === "foreign" || c.action === "invalid" || c.action === "failed") {
-          console.warn(`⚠ skill ${c.name} 未分发：${c.reason}`);
+          // 与 sync-engine.ts 的 refreshOrgSkills 同一格式：不带 tool 标注时，
+          // 两个目标各出一条 foreign/failed 会打印成两行完全相同的文字，
+          // 读起来像重复打印的 bug，而不是「两个目标各有一次」。
+          const where = c.tool ? `，${c.tool}` : "";
+          console.warn(`⚠ skill ${c.name} 未分发（${c.action}${where}）：${c.reason}`);
         }
       }
     } catch (e) {

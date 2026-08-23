@@ -873,7 +873,13 @@ describe("syncSkills", () => {
     const { home, skills } = fakeHome("sync-isolate-home");
     seedSkill(kb, "a");
     // ~/.codex/skills 预先建成只读：cleanTmpDirs/readExistingTargets 能读，
-    // installSkill 写临时目录时 EACCES → 该目标落 failed
+    // installSkill 写临时目录时 EACCES → 该目标落 failed。
+    // 光建 ~/.codex/skills 不够让 skillTargets 判定「装了 Codex」（正向识别只
+    // 认 CODEX_INSTALL_MARKERS 里的名字，skills/ 本身不在其中——这正是本次
+    // 修复要挡住的锁存场景），必须在 ~/.codex 顶层放一个真实标记文件才能让
+    // Codex 目标继续在列，测出这条用例本来要测的目标级隔离。
+    fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".codex", "config.toml"), "");
     fs.mkdirSync(path.join(home, ".codex", "skills"), { recursive: true });
     fs.chmodSync(path.join(home, ".codex", "skills"), 0o500);
     try {
@@ -1014,12 +1020,38 @@ describe("skillTargets", () => {
   });
 
   it("~/.codex 只有 AGENTS.md（knowbase 自建的空壳）→ 未安装，不加入", () => {
-    // 这是本次修复要挡住的回归场景：syncAgentConfig 给每个用户写
-    // ~/.codex/AGENTS.md，writeFileAtomic 顺带 mkdirSync 创建了这个目录，
-    // 这不代表机器上真的装了 Codex
+    // syncAgentConfig 给每个用户写 ~/.codex/AGENTS.md，writeFileAtomic 顺带
+    // mkdirSync 创建了这个目录，这不代表机器上真的装了 Codex。正向识别下
+    // AGENTS.md 本来就不在 CODEX_INSTALL_MARKERS 里，天然不会被误判。
     const home = tmpDir("targets-codex-agents-only");
     fs.mkdirSync(path.join(home, ".codex"));
     fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "# Codex\n");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  });
+
+  it("~/.codex 有 AGENTS.md 的原子写临时文件残留 → 未安装，不加入", () => {
+    // 回归场景：agent-config.ts 的 writeFileAtomic 写 AGENTS.md 失败或进程被
+    // SIGKILL 杀在 rename 之前，会在 ~/.codex 下留一个
+    // AGENTS.md.knowbase-tmp-<pid> 永久不被清理（cleanTmpDirs 只扫 skills
+    // 目标目录，不扫 ~/.codex 本身）。若把「存在 AGENTS.md 以外的条目」当成
+    // 安装证据，一次崩溃就会让一台从未装过 Codex 的机器永久收到 skill 分发。
+    const home = tmpDir("targets-codex-tmp-residue");
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "# Codex\n");
+    fs.writeFileSync(path.join(home, ".codex", "AGENTS.md.knowbase-tmp-4242"), "半成品\n");
+    expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
+  });
+
+  it("~/.codex 只有本功能自己创建的 skills/ 目录 → 未安装，不加入（锁存回归）", () => {
+    // 回归场景：syncSkillsToTarget 一旦判定过一次「已安装」就会在 ~/.codex 下
+    // mkdirSync 出 skills/。若把「存在 AGENTS.md 以外的条目」当成安装证据，
+    // 这个 skills/ 目录本身会让下一周期永远重新判定为「已安装」——即使真实
+    // 的 Codex 已被卸载，也无法退回未安装状态，直接违反「每个同步周期重新
+    // 求值、卸掉后自动停止」的承诺。
+    const home = tmpDir("targets-codex-latch");
+    fs.mkdirSync(path.join(home, ".codex"));
+    fs.writeFileSync(path.join(home, ".codex", "AGENTS.md"), "# Codex\n");
+    fs.mkdirSync(path.join(home, ".codex", "skills", "org-a"), { recursive: true });
     expect(skillTargets(home).map((t) => t.name)).toEqual(["Claude Code"]);
   });
 

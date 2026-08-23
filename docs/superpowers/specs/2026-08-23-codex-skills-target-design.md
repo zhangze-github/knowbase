@@ -20,13 +20,19 @@ knowbase 的 agent 集成一直是双目标的（`agent-config.ts` 同时写 `~/
 
 ## 3. 门控：真实装了 Codex 才分发
 
-Codex 目标仅当 **`~/.codex` 是目录，且目录里存在 `AGENTS.md` 以外的条目**时生效；`~/.claude/skills` 维持现状无条件分发。
+Codex 目标仅当 **`~/.codex` 是目录，且目录里存在至少一个已知的 Codex 自产条目**时生效；`~/.claude/skills` 维持现状无条件分发。已知条目取一个固定的正向标记列表：`config.toml` / `auth.json` / `sessions` / `history.jsonl` / `logs`（文件或目录皆可，命中任意一个即判定已安装）。
 
-- **不能只判断「`~/.codex` 存在」**：knowbase 自己的 `syncAgentConfig` 会给每个用户写 `~/.codex/AGENTS.md`，而 `writeFileAtomic` 内部无条件 `mkdirSync(dirname, {recursive:true})`——任何跑过一次 `knowbase init` 的机器，不管装没装 Codex，`~/.codex` 目录都会被 knowbase 自己造出来。「目录存在」这个信号因此失效：早期设计（见上一版本）用它做门控，导致没装 Codex 的机器也收到 skill 分发（`test/cli.test.ts` 曾在此处回归）。
-- 判断依据改为「目录里有没有 `AGENTS.md` 以外的东西」：真实的 Codex 安装目录里必然还有别的东西（`config.toml` / `sessions/` / `auth.json` 等），knowbase 造出来的空壳里只有 `AGENTS.md` 一个文件。不挑某个具体文件名（如 `config.toml`）判断，是因为那依赖 Codex 的版本细节，全新安装可能还没生成它。
+> 修订记录：本节最初版本用的是反向排除——只把 `~/.codex/AGENTS.md`（knowbase 自己写的全局提示词）排除在外，「目录里有 AGENTS.md 以外的东西」即判定已安装。这个方案在最终评审中被推翻，理由见下。
+
+- **不能只判断「`~/.codex` 存在」**：knowbase 自己的 `syncAgentConfig` 会给每个用户写 `~/.codex/AGENTS.md`，而 `writeFileAtomic` 内部无条件 `mkdirSync(dirname, {recursive:true})`——任何跑过一次 `knowbase init` 的机器，不管装没装 Codex，`~/.codex` 目录都会被 knowbase 自己造出来。「目录存在」这个信号因此失效。
+- **反向排除为什么被放弃**：knowbase 在 `~/.codex` 下会留下的自产条目集合是开放的，黑名单排不完——
+  - `writeFileAtomic` 失败或进程被 `SIGKILL` 杀在 `rename` 之前，会在 `~/.codex` 下留一个 `AGENTS.md.knowbase-tmp-<pid>` 临时文件，`cleanTmpDirs` 只扫各 skills 目标目录、不扫 `~/.codex` 本身，这个文件永久不会被清理。只排除 `AGENTS.md` 挡不住它，一次崩溃就能把一台从未装过 Codex 的机器永久误判为「装了」。
+  - 本功能自己会在判定为「已安装」后于 `~/.codex` 下建出 `skills/` 子目录（`syncSkillsToTarget` 的 `mkdirSync`）。反向排除下这个目录本身就会让下一周期继续判定为「已安装」——即使真实的 Codex 从未存在或已被卸载，也无法退回未安装状态，形成单向锁存（latch），直接违反本节「门控每周期动态求值」与 CHANGELOG「卸掉 Codex 后下个周期自动停止」的承诺。
+  - 用户在 Finder 里打开一次 `~/.codex` 就会落下 `.DS_Store`，同样会被误判。
+  - 最初版本「不挑具体文件名，因为全新安装可能还没生成它」这个顾虑不成立：Codex 从未运行过时 `~/.codex` 根本不存在（读取失败分支已经短路成未安装）；目录存在就意味着 Codex 至少运行过一次，运行过一次就会落下标记列表里的至少一项。
 - 判断 `~/.codex` 而非 `~/.codex/skills`：装了 Codex 但从未建过 skills 目录的机器也该收到分发，`~/.codex/skills` 由安装分支现有的 `mkdirSync` 创建。
 - 读取失败（不存在、`EACCES`、`~/.codex` 是普通文件等）一律视为未安装、跳过分发，不报错——判断不出真实安装状态时，保守地不分发比抛异常中断整个同步更安全。
-- 门控每周期动态求值：装 Codex 后下个同步周期自动开始分发，`~/.codex` 消失（或退化成只剩 `AGENTS.md`）后自动停止并且**不删已分发的副本**（目录都没了副本自然也没了；若只删 skills 子目录，下周期门控失败不再管它——不为病态状态设计清理路径）。
+- 门控每周期动态求值：装 Codex 后下个同步周期自动开始分发，`~/.codex` 消失（或退化成不再含任何标记条目）后自动停止并且**不删已分发的副本**（目录都没了副本自然也没了；若只删 skills 子目录，下周期门控失败不再管它——不为病态状态设计清理路径）。正向标记天然不含 knowbase 自己会产出的任何名字，因此不会重新锁存。
 
 选「真实装了才分发」而非「无条件分发」（与 agent-config 的无条件写入不同）的理由：agent-config 只在 init 跑一次，不写就永远没机会；skills 分发每周期都跑，门控可以自愈，而无条件分发会在没装 Codex 的机器上留一棵永远无人消费的目录树，uninstall 也要多清理一处。
 
@@ -89,7 +95,7 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[]
 
 ## 10. 测试
 
-- `skillTargets` 门控：`~/.codex` 不存在 / 是普通文件 / 是空目录 / 只有 `AGENTS.md` / 有真实 Codex 标记文件（含与 `AGENTS.md` 并存），共五种情况（注入临时 home）。
+- `skillTargets` 门控：`~/.codex` 不存在 / 是普通文件 / 是空目录 / 只有 `AGENTS.md` / 只有 `AGENTS.md` 的原子写临时文件残留 / 只有本功能自建的 `skills/` 目录（锁存回归）/ 有真实 Codex 标记文件（含与 `AGENTS.md` 并存），共七种情况（注入临时 home）。
 - 双目标分发：同一源在两个 skillsHome 各得一份带独立 marker 的副本，`SKILL.md` 的 `name:` 均被改写。
 - 目标隔离：一个目标安装失败（构造只读 skillsHome），另一目标正常完成且结果条目归属正确。
 - 删除传播：源删除后两个目标的托管副本都被清理。
