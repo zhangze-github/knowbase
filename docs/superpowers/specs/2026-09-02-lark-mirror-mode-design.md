@@ -53,7 +53,7 @@ git 仓库（镜像 + 历史 + 分发；exporter 是唯一 writer）
 - 企业自建应用（bot），申请 wiki / docx / drive 读权限；将 bot 加为知识库 space 成员。
 - 使用 tenant access token，不依赖任何个人账号。
 
-### 3.3 同步循环（默认间隔 5 分钟，可配）
+### 3.3 同步循环（默认间隔 2 分钟，可配）
 
 1. 分页拉取 wiki space 节点树（可配置只导出某个子树根节点）。
 2. 与仓库内状态清单 `.knowbase-mirror.json` 对比（`node_token → { path, obj_edit_time, content_hash }`），得出增 / 改 / 移 / 删四类变更。
@@ -116,7 +116,7 @@ managed_by: knowbase-mirror
 ### 4.3 本地改动处理（只读的执行）
 
 - **硬防护**：daemon 每次 pull 更新后，将镜像内 md 文件设为只读（POSIX 444 / Windows read-only 属性）。agent 的 Edit/Write 当场报权限错误——失败即引导，agent 回头读 frontmatter 走飞书通道。daemon 自身更新前先解锁，更新后重新上锁。`skills/`、`.knowbase-mirror.json`、`.gitignore` 等仓库原生文件不在锁定范围。
-- **兜底**：每周期 `git status` 发现脏文件 → 改动内容全文存入日志目录留底 → `git checkout` + `git clean` 恢复 → `status` 报警告。原则不变：不静默丢内容（留底），不阻塞等待人。
+- **兜底**：每周期 `git status` 发现脏文件 → `git checkout` + `git clean` 直接丢弃恢复 → 日志记录被丢弃的文件名列表，`status` 报警告。镜像目录内不存在合法的本地修改，正确的修改入口只有飞书（§5），因此直接丢弃、不留底。
 
 ### 4.4 status 扩展
 
