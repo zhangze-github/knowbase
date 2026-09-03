@@ -116,7 +116,7 @@ managed_by: knowbase-mirror
 ### 4.3 本地改动处理（只读的执行）
 
 - **硬防护**：daemon 每次 pull 更新后，将镜像内 md 文件设为只读（POSIX 444 / Windows read-only 属性）。agent 的 Edit/Write 当场报权限错误——失败即引导，agent 回头读 frontmatter 走飞书通道。daemon 自身更新前先解锁，更新后重新上锁。`skills/`、`.knowbase-mirror.json`、`.gitignore` 等仓库原生文件不在锁定范围。
-- **兜底**：每周期 `git status` 发现脏文件 → `git checkout` + `git clean` 直接丢弃恢复 → 日志记录被丢弃的文件名列表，`status` 报警告。镜像目录内不存在合法的本地修改，正确的修改入口只有飞书（§5），因此直接丢弃、不留底。
+- **兜底**：每周期 `git status` 发现脏文件 → `git reset --hard` + `git clean` 直接丢弃恢复（reset 同时清掉 staged 改动）→ 日志记录被丢弃的文件名列表，`status` 报警告。镜像目录内不存在合法的本地修改，正确的修改入口只有飞书（§5），因此直接丢弃、不留底。
 
 ### 4.4 status 扩展
 
