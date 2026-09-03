@@ -52,7 +52,7 @@ describe("LarkClient", () => {
       if (u.includes("tenant_access_token")) return { body: TOKEN_BODY };
       hits++;
       if (hits <= 2) return { status: 429, headers: { "x-ogw-ratelimit-reset": "1" }, body: { code: 99991400 } };
-      return { body: { code: 0, data: { node: { node_token: "n", obj_token: "o", obj_type: "docx", parent_node_token: "", title: "t", obj_edit_time: "1", has_child: false }, space_id: "spc" } } };
+      return { body: { code: 0, data: { node: { node_token: "n", obj_token: "o", obj_type: "docx", parent_node_token: "", title: "t", obj_edit_time: "1", has_child: false, space_id: "spc" } } } };
     });
     const r = await c.getNode("n");
     expect(r.node.node_token).toBe("n");

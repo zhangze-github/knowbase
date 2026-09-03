@@ -22,7 +22,7 @@ const MAX_RETRIES = 5;
 const TOKEN_SLACK_MS = 300 * 1000;
 
 export class LarkClient {
-  private opts: Required<Pick<LarkClientOpts, "appId" | "appSecret">> & LarkClientOpts;
+  private opts: LarkClientOpts & { endpoint: string };
   private token: string | null = null;
   private tokenExpireAt = 0;
 
@@ -120,11 +120,11 @@ export class LarkClient {
   }
 
   async getNode(token: string): Promise<{ space_id: string; node: WikiNode }> {
-    // §note：飞书 get_node 响应 data.space_id 与 data.node 是同级字段（非 node.space_id）。
-    const data = await this.request<{ node: WikiNode; space_id?: string }>(
+    // 飞书 wiki-v2 get_node 官方响应中 space_id 位于 data.node 内部（非 data 顶层同级字段）；spec §3.2。
+    const data = await this.request<{ node: WikiNode & { space_id?: string } }>(
       "GET", "/open-apis/wiki/v2/spaces/get_node", { token }
     );
-    return { space_id: data.space_id ?? "", node: data.node };
+    return { space_id: data.node.space_id ?? "", node: data.node };
   }
 
   async listDocBlocks(documentId: string): Promise<DocxBlock[]> {
