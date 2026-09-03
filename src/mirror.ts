@@ -130,5 +130,6 @@ export function discardLocalChanges(dir: string): string[] {
 
   git.checkoutAll(dir);
   git.cleanUntracked(dir, [PAUSE_MARKER]);
-  return expandedFiles;
+  // 过滤掉暂停标记，避免调用方误报其被丢弃（实际被 -e 排除保留）
+  return expandedFiles.filter((f) => f !== PAUSE_MARKER);
 }
