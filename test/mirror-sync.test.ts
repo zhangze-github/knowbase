@@ -39,6 +39,34 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
     expect(fs.existsSync(path.join(dir, "rogue.md"))).toBe(false);
   });
 
+  it("稳态周期零 chmod：干净镜像仓库连续两轮 syncOnce，第二轮不改动任何 md 文件属性", () => {
+    // 回归用例：曾经每轮无条件 setMirrorLock(dir, false) 再在 finally 里
+    // setMirrorLock(dir, true)，chmod 触发 fs.watch 事件、watcher 防抖后
+    // 又跑一轮，自触发成死循环。断言用真实文件属性（mode + ctime）而非 mock：
+    // chmod 系统调用即使把 mode 设成相同的值也总会推进 ctime，因此「稳态
+    // 零 chmod」和「ctime 不变」在这里等价，比打桩计数更贴近真实行为。
+    const { dir, cfg, logger } = setup();
+    const mdFile = path.join(dir, "docs", "guide.md");
+
+    // 第一轮：完成首次上锁（0o644 → 0o444），期间确实会发生 chmod。
+    const r1 = syncOnce(cfg, { logger });
+    expect(r1.mirror).toBe(true);
+
+    const statOf = () => {
+      const st = fs.statSync(mdFile);
+      return { mode: st.mode & 0o777, ctimeMs: st.ctimeMs };
+    };
+    const before = statOf();
+
+    // 第二轮：工作区干净、远端无新提交 —— 应当零 chmod。
+    const r2 = syncOnce(cfg, { logger });
+    expect(r2.mirror).toBe(true);
+    expect(r2.discardedFiles).toEqual([]);
+
+    const after = statOf();
+    expect(after).toEqual(before);
+  });
+
   it("拉取远端更新，同步后 md 文件为只读", () => {
     const { root, dir, cfg, logger } = setup();
     pushMirrorUpdate(root, "docs/new.md", "---\nfeishu_url: u\n---\n新文档\n");
@@ -77,7 +105,7 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
 
   it("经典仓库（无清单）不受影响：仍走上行路径", () => {
     const root = tmpDir("classic");
-    const bare = makeOrigin(root); // makeOrigin 加进文件顶部的 helpers import
+    const bare = makeOrigin(root);
     const dir = path.join(root, "member");
     cloneWorkdir(bare, dir);
     write(dir, "note.md", "本地新增\n");

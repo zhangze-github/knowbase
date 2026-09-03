@@ -281,16 +281,28 @@ export function mirrorSyncOnce(cfg: Config, deps: SyncDeps): SyncResult {
 
   try {
     clearStaleLock(dir, logger);
-    // 锁是我们自己上的（spec §4.3），操作前先全部解锁，避免 checkout/clean 受阻
-    setMirrorLock(dir, false);
 
-    const discarded = discardLocalChanges(dir);
-    if (discarded.length > 0) {
-      result.discardedFiles = discarded;
-      logger.log(
-        `镜像目录被本地修改，已丢弃 ${discarded.length} 个文件的改动：${discarded.join(", ")}` +
-          `（修改请走飞书文档，见各文件头部 feishu_url）`
-      );
+    // 稳态（无本地改动、无需 reset）零 chmod：chmod 会触发 fs.watch 事件，
+    // watcher 防抖后又排一轮新周期，若每轮无条件解锁/上锁就会自触发成死循环
+    // （周期坍缩为防抖窗口那么短，实测 macOS/Linux 均可复现）。因此只在
+    // 确实要做写操作（丢弃改动 / reset）前才解锁，finally 的收尾上锁本身是
+    // 幂等的——已经是 444 时不产生 chmod 调用、返回 0。
+    if (git.hasChanges(dir)) {
+      setMirrorLock(dir, false);
+      const discard = discardLocalChanges(dir);
+      if (discard.error) {
+        // 与 fetch 失败同一模式：记录、留给下一周期重试，本轮不再继续。
+        result.error = `丢弃本地改动失败：${discard.error}`;
+        logger.log(result.error + "（下一周期重试）");
+        return result;
+      }
+      if (discard.files.length > 0) {
+        result.discardedFiles = discard.files;
+        logger.log(
+          `镜像目录被本地修改，已丢弃 ${discard.files.length} 个文件的改动：${discard.files.join(", ")}` +
+            `（修改请走飞书文档，见各文件头部 feishu_url）`
+        );
+      }
     }
 
     const f = git.fetch(dir, REMOTE);
@@ -307,6 +319,9 @@ export function mirrorSyncOnce(cfg: Config, deps: SyncDeps): SyncResult {
     ) {
       // behind：正常跟进。ahead/分叉：有人绕过锁手动 commit 过——镜像仓库的
       // 本地历史没有保留价值，硬复位即「丢弃改动」在提交层面的同一原则。
+      // 仅在真正需要 reset 时解锁（Windows 只读属性会阻止 reset --hard
+      // 删除/覆盖文件）；已经解锁过（本轮丢弃过改动）时 setMirrorLock 幂等。
+      setMirrorLock(dir, false);
       const r = git.resetHard(dir, upstream);
       if (git.ok(r)) {
         result.merged = true;
