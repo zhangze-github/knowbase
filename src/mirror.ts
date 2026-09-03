@@ -42,3 +42,47 @@ export function readMirrorManifest(dir: string): MirrorManifest | null {
     return null;
   }
 }
+
+/**
+ * 上锁豁免（spec §4.3）：.git 与 node_modules 显然；skills/ 是 git 原生区
+ * （spec §8），由 PR 维护、不来自飞书，不属于镜像内容。
+ */
+const LOCK_EXEMPT = new Set([".git", "skills", "node_modules"]);
+
+function collectMd(dir: string, acc: string[] = []): string[] {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return acc;
+  }
+  for (const e of entries) {
+    if (LOCK_EXEMPT.has(e.name)) continue;
+    const full = path.join(dir, e.name);
+    if (e.isDirectory()) collectMd(full, acc);
+    else if (e.isFile() && e.name.toLowerCase().endsWith(".md")) acc.push(full);
+  }
+  return acc;
+}
+
+/**
+ * 镜像内容只读锁（spec §4.3 硬防护）：agent 的 Edit/Write 当场报权限错误，
+ * 失败即引导它回头读 frontmatter 走飞书通道。只锁 .md：其余文件（图片等
+ * 附件）没有被 agent 顺手编辑的现实风险，锁面越小越不容易误伤。
+ * Windows 上 chmod 映射为 read-only 属性，mode 回读不精确导致幂等判断失效、
+ * 每轮全量 chmod——无害，接受。
+ */
+export function setMirrorLock(dir: string, locked: boolean): number {
+  const mode = locked ? 0o444 : 0o644;
+  let changed = 0;
+  for (const f of collectMd(dir)) {
+    try {
+      if ((fs.statSync(f).mode & 0o777) === mode) continue;
+      fs.chmodSync(f, mode);
+      changed++;
+    } catch {
+      // 单个文件失败（并发删除等）不阻塞其余文件
+    }
+  }
+  return changed;
+}
