@@ -1,12 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
-import { tmpDir } from "./helpers.js";
+import { tmpDir, g, setIdentity, write, read } from "./helpers.js";
 import {
   MIRROR_MANIFEST,
   isMirrorMode,
   readMirrorManifest,
   setMirrorLock,
+  discardLocalChanges,
 } from "../src/mirror.js";
 
 describe("镜像清单与模式识别", () => {
@@ -76,5 +77,44 @@ describe("setMirrorLock 只读锁", () => {
     fs.writeFileSync(path.join(dir, "a.md"), "a");
     setMirrorLock(dir, true);
     expect(() => fs.writeFileSync(path.join(dir, "a.md"), "x")).toThrow();
+  });
+});
+
+describe("discardLocalChanges", () => {
+  function makeRepo(): string {
+    const dir = tmpDir("discard");
+    g(dir, "init", "-b", "main", ".");
+    setIdentity(dir);
+    write(dir, ".gitignore", ".knowbase-pause\n");
+    write(dir, "a.md", "原文\n");
+    g(dir, "add", "-A");
+    g(dir, "commit", "-m", "init");
+    return dir;
+  }
+
+  it("恢复被改的跟踪文件、删除未跟踪文件，返回文件清单", () => {
+    const dir = makeRepo();
+    write(dir, "a.md", "被 agent 改坏\n");
+    write(dir, "new-dir/rogue.md", "越权新增\n");
+    const files = discardLocalChanges(dir);
+    expect(files.sort()).toEqual(["a.md", "new-dir/rogue.md"]);
+    expect(read(dir, "a.md")).toBe("原文\n");
+    expect(fs.existsSync(path.join(dir, "new-dir"))).toBe(false);
+  });
+
+  it("暂停标记与被忽略文件不被清掉", () => {
+    const dir = makeRepo();
+    write(dir, ".knowbase-pause", "");
+    write(dir, "b.md", "改动\n"); // 制造一个真实改动触发清理路径
+    write(dir, "b2.md", "x\n");
+    discardLocalChanges(dir);
+    // .knowbase-pause 已被 .gitignore 忽略（clean 无 -x 不删），
+    // 且 cleanUntracked 还带 -e 兜底 exporter 忘记种 .gitignore 的情况
+    expect(fs.existsSync(path.join(dir, ".knowbase-pause"))).toBe(true);
+  });
+
+  it("工作区干净时返回空数组", () => {
+    const dir = makeRepo();
+    expect(discardLocalChanges(dir)).toEqual([]);
   });
 });

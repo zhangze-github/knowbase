@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import * as git from "./git.js";
+import { PAUSE_MARKER } from "./config.js";
 
 /**
  * 飞书镜像模式（spec §4）：仓库根存在本清单文件即为镜像仓库。
@@ -85,4 +87,48 @@ export function setMirrorLock(dir: string, locked: boolean): number {
     }
   }
   return changed;
+}
+
+/**
+ * 丢弃镜像目录内的一切本地改动（spec §4.3 兜底）：镜像目录内不存在合法的
+ * 本地修改，正确的修改入口只有飞书，因此直接丢弃、不留底；被丢弃的文件名
+ * 由调用方记日志与 status 警告。-e 兜底 exporter 忘记把暂停标记种进
+ * .gitignore 的情况——暂停标记是成员本机状态，误删等于静默取消用户的暂停。
+ */
+export function discardLocalChanges(dir: string): string[] {
+  const files = git.changedFiles(dir);
+  if (files.length === 0) return [];
+
+  // git status 对完全未跟踪的目录，有时会显示目录名而不是文件名，需要展开
+  const expandedFiles: string[] = [];
+  for (const f of files) {
+    if (f.endsWith("/")) {
+      // 递归列出目录下所有文件
+      const dirPath = path.join(dir, f);
+      function listFiles(p: string, rel: string): void {
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(p, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const e of entries) {
+          const fullPath = path.join(p, e.name);
+          const relPath = path.join(rel, e.name);
+          if (e.isDirectory()) {
+            listFiles(fullPath, relPath);
+          } else if (e.isFile()) {
+            expandedFiles.push(relPath.replace(/\\/g, "/"));
+          }
+        }
+      }
+      listFiles(dirPath, f.slice(0, -1));
+    } else {
+      expandedFiles.push(f);
+    }
+  }
+
+  git.checkoutAll(dir);
+  git.cleanUntracked(dir, [PAUSE_MARKER]);
+  return expandedFiles;
 }
