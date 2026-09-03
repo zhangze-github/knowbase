@@ -67,6 +67,17 @@ knowbase exporter \
   --once
 ```
 
+不想设环境变量时，全部参数也可以只通过启动命令传入（注意 secret 会留在 shell history）：
+
+```bash
+knowbase exporter \
+  --repo ~/temp-repo \
+  --space "https://your-org.feishu.cn/wiki/space/your-space-id" \
+  --app-id "your-app-id" \
+  --app-secret "your-app-secret" \
+  --once
+```
+
 **验收标准**：
 
 - 导出完成后，`~/temp-repo` 目录中出现 markdown 文件（`.md` 文件）
@@ -286,10 +297,12 @@ sudo journalctl -u knowbase-exporter -n 50 # 最近 50 行
 
 ## 环境变量参考
 
+> 全部参数也可以只通过启动命令传入：凭证对应 `--app-id` / `--app-secret` / `--endpoint` 命令行参数（命令行优先于环境变量）。注意 `--app-secret` 走命令行会留在 shell history / `ps` 输出中，长驻部署（Docker/systemd）仍推荐环境变量。
+
 | 变量 | 是否必需 | 说明 |
 |------|---------|------|
-| `KNOWBASE_LARK_APP_ID` | 是 | 飞书应用 App ID |
-| `KNOWBASE_LARK_APP_SECRET` | 是 | 飞书应用 App Secret |
+| `KNOWBASE_LARK_APP_ID` | 是* | 飞书应用 App ID（*或用 `--app-id` 传入） |
+| `KNOWBASE_LARK_APP_SECRET` | 是* | 飞书应用 App Secret（*或用 `--app-secret` 传入） |
 | `KNOWBASE_LARK_SPACE` | 是 | 知识库 space URL（如 `https://org.feishu.cn/wiki/space/123`） |
 | `KNOWBASE_MIRROR_REPO_URL` | 仅初次 | Git 仓库 URL，首次 clone 时必需；之后可省略 |
 | `KNOWBASE_EXPORTER_EXTRA_ARGS` | 否 | 传递给 `knowbase exporter` 的额外参数（如 `--interval 300` 覆盖默认同步间隔） |

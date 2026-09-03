@@ -81,13 +81,37 @@ describe("parseExporterArgs", () => {
     expect(r.spaceId).toBeUndefined();
   });
 
-  it("缺 env 凭据 → errors 含 KNOWBASE_LARK_APP_ID / KNOWBASE_LARK_APP_SECRET 字样", () => {
+  it("CLI 与 env 都缺凭据 → errors 同时提示 --app-id/--app-secret 与环境变量两条路", () => {
     const r = parseExporterArgs(
       { repo: "/tmp/repo", space: "7123456", host: "acme.feishu.cn" },
       {} as NodeJS.ProcessEnv
     );
-    expect(r.errors.some((e) => e.includes("KNOWBASE_LARK_APP_ID"))).toBe(true);
-    expect(r.errors.some((e) => e.includes("KNOWBASE_LARK_APP_SECRET"))).toBe(true);
+    expect(r.errors.some((e) => e.includes("--app-id") && e.includes("KNOWBASE_LARK_APP_ID"))).toBe(true);
+    expect(r.errors.some((e) => e.includes("--app-secret") && e.includes("KNOWBASE_LARK_APP_SECRET"))).toBe(true);
+  });
+
+  it("凭据可全经命令行传入（无 env）；CLI 参数优先于 env", () => {
+    // 纯命令行：不依赖任何环境变量
+    const cli = parseExporterArgs(
+      {
+        repo: "/tmp/repo", space: "7123456", host: "acme.feishu.cn",
+        appId: "cli-id", appSecret: "cli-secret", endpoint: "https://open.larksuite.com",
+      },
+      {} as NodeJS.ProcessEnv
+    );
+    expect(cli.errors).toEqual([]);
+    expect(cli.appId).toBe("cli-id");
+    expect(cli.appSecret).toBe("cli-secret");
+    expect(cli.endpoint).toBe("https://open.larksuite.com");
+
+    // CLI 与 env 同时存在：CLI 优先
+    const both = parseExporterArgs(
+      { repo: "/tmp/repo", space: "7123456", host: "acme.feishu.cn", appId: "cli-id" },
+      { KNOWBASE_LARK_APP_ID: "env-id", KNOWBASE_LARK_APP_SECRET: "env-secret" } as NodeJS.ProcessEnv
+    );
+    expect(both.errors).toEqual([]);
+    expect(both.appId).toBe("cli-id");
+    expect(both.appSecret).toBe("env-secret"); // 未给 CLI 的字段回落 env
   });
 
   it("纯 space_id 缺 --host → errors 非空", () => {

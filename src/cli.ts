@@ -80,8 +80,14 @@ program
   .option("--inbox-url <url>", "写回收件箱链接（写入 manifest，供后续写回能力使用）")
   .option("--once", "只跑一轮导出后退出（退出码：失败为 1，成功为 0），用于 cron 部署或冒烟验证")
   .option("--full", "本轮强制全量对账，忽略 24h 窗口（仅可与 --once 连用；daemon 模式已按 24h 自动全量对账）")
+  .option("--app-id <id>", "飞书自建应用 App ID（缺省读环境变量 KNOWBASE_LARK_APP_ID）")
+  .option(
+    "--app-secret <secret>",
+    "飞书自建应用 App Secret（缺省读环境变量 KNOWBASE_LARK_APP_SECRET；命令行传参会留在 shell history，长驻部署推荐用环境变量）"
+  )
+  .option("--endpoint <url>", "飞书开放平台 API 端点（缺省读 KNOWBASE_LARK_ENDPOINT，默认 https://open.feishu.cn）")
   .description(
-    "把飞书知识空间导出为本地 Markdown 镜像仓库并持续同步（凭证走环境变量 KNOWBASE_LARK_APP_ID / KNOWBASE_LARK_APP_SECRET，不走命令行参数）"
+    "把飞书知识空间导出为本地 Markdown 镜像仓库并持续同步（全部参数可经命令行传入；凭证也可走环境变量 KNOWBASE_LARK_APP_ID / KNOWBASE_LARK_APP_SECRET）"
   )
   .action(async (opts: Record<string, string | boolean | undefined>) => {
     try {

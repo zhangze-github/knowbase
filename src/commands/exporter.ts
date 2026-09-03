@@ -129,23 +129,27 @@ export function parseExporterArgs(
     errors.push("--full 只能与 --once 连用（daemon 模式每 24h 自动全量对账）");
   }
 
-  // env 凭据不走 CLI 参数，避免落进 shell history（brief）。
-  const appId = env.KNOWBASE_LARK_APP_ID?.trim() ?? "";
-  const appSecret = env.KNOWBASE_LARK_APP_SECRET?.trim() ?? "";
+  // 凭据：命令行参数优先，环境变量兜底——所有参数都可以只通过启动命令传入；
+  // 注意 --app-secret 走命令行会留在 shell history / ps 输出里，长驻部署仍推荐 env。
+  const appIdOpt = typeof opts.appId === "string" ? opts.appId.trim() : "";
+  const appSecretOpt = typeof opts.appSecret === "string" ? opts.appSecret.trim() : "";
+  const appId = appIdOpt !== "" ? appIdOpt : env.KNOWBASE_LARK_APP_ID?.trim() ?? "";
+  const appSecret = appSecretOpt !== "" ? appSecretOpt : env.KNOWBASE_LARK_APP_SECRET?.trim() ?? "";
   if (!appId) {
     errors.push(
-      "缺少环境变量 KNOWBASE_LARK_APP_ID：先在飞书开放平台（open.feishu.cn）创建一个企业自建应用，" +
-        "把「凭证与基础信息」里的 App ID 写入环境变量 KNOWBASE_LARK_APP_ID。"
+      "缺少 App ID：通过 --app-id <id> 传入，或设置环境变量 KNOWBASE_LARK_APP_ID。" +
+        "先在飞书开放平台（open.feishu.cn）创建一个企业自建应用，取「凭证与基础信息」里的 App ID。"
     );
   }
   if (!appSecret) {
     errors.push(
-      "缺少环境变量 KNOWBASE_LARK_APP_SECRET：在同一个应用的「凭证与基础信息」里复制 App Secret，" +
-        "写入环境变量 KNOWBASE_LARK_APP_SECRET；并确认已把该应用的机器人加入目标知识空间（否则拉取会因无权限失败）。"
+      "缺少 App Secret：通过 --app-secret <secret> 传入，或设置环境变量 KNOWBASE_LARK_APP_SECRET。" +
+        "在同一个应用的「凭证与基础信息」里复制 App Secret；并确认已把该应用的机器人加入目标知识空间（否则拉取会因无权限失败）。"
     );
   }
+  const endpointOpt = typeof opts.endpoint === "string" ? opts.endpoint.trim() : "";
   const endpointEnv = env.KNOWBASE_LARK_ENDPOINT?.trim() ?? "";
-  const endpoint = endpointEnv !== "" ? endpointEnv : DEFAULT_ENDPOINT;
+  const endpoint = endpointOpt !== "" ? endpointOpt : endpointEnv !== "" ? endpointEnv : DEFAULT_ENDPOINT;
 
   return {
     repoDir,
