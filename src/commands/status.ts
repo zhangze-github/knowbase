@@ -145,7 +145,6 @@ export function cmdStatus(): number {
   }
 
   // 本地待推送
-  console.log("");
   let uncommitted = 0;
   let ahead = 0;
   if (git.isRepo(cfg.dir)) {
@@ -153,6 +152,7 @@ export function cmdStatus(): number {
     ahead = git.aheadCount(cfg.dir, `origin/${cfg.branch}`);
   }
   if (!mirrorMode) {
+    console.log("");
     console.log(`本地未提交改动：${uncommitted} 个文件`);
     console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
   }

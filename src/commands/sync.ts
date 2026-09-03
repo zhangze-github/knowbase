@@ -20,8 +20,17 @@ export function cmdSync(): number {
     console.log("⏸  已暂停（存在 .knowbase-pause），本次跳过。运行 `knowbase resume` 恢复。");
     return 0;
   }
+  if (r.mirror) {
+    console.log("• 镜像模式：本地为飞书知识库只读镜像（真相源在飞书）");
+  }
   if (r.committed) console.log("• 已提交本地改动");
-  if (r.merged) console.log("• 已合并远端改动");
+  if (r.merged) console.log(r.mirror ? "• 已跟随远端更新" : "• 已合并远端改动");
+  if (r.discardedFiles.length > 0) {
+    console.log(
+      `• 镜像只读，已丢弃本地改动 ${r.discardedFiles.length} 个文件：${r.discardedFiles.join(", ")}`
+    );
+    console.log("  修改请走各文件 frontmatter 的 feishu_url");
+  }
   if (r.conflictCopies.length > 0) {
     console.log(`• 生成冲突副本 ${r.conflictCopies.length} 个：${r.conflictCopies.join(", ")}`);
   }
