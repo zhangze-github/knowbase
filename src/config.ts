@@ -50,6 +50,11 @@ export function logPath(): string {
   return path.join(configDir(), "knowbase.log");
 }
 
+/** exporter（`knowbase exporter`）独立日志路径，不与主同步日志混在一起，便于单独排查。 */
+export function exporterLogPath(): string {
+  return path.join(configDir(), "exporter.log");
+}
+
 /**
  * launchd/systemd 重定向守护进程 stdout/stderr 的独立文件。
  * 不能与 logPath() 共用：Logger 用 rename 轮转，服务管理器持有的旧 fd

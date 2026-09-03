@@ -9,6 +9,7 @@ import { cmdPause } from "./commands/pause.js";
 import { cmdResume } from "./commands/resume.js";
 import { cmdUninstall } from "./commands/uninstall.js";
 import { cmdDaemon } from "./commands/daemon.js";
+import { cmdExporter } from "./commands/exporter.js";
 
 const require = createRequire(import.meta.url);
 const pkg = require("../package.json") as { name: string; version: string };
@@ -67,6 +68,29 @@ program
   .command("uninstall")
   .description("干净移除：注销自启、停止守护进程，保留本地文件夹")
   .action(() => run(cmdUninstall));
+
+program
+  .command("exporter")
+  .requiredOption("--repo <path>", "已 clone 的飞书镜像仓库本地路径")
+  .requiredOption("--space <spaceOrUrl>", "飞书 wiki 链接（空间首页或节点）或 space_id")
+  .option("--host <host>", "飞书域名，如 acme.feishu.cn（--space 为纯 space_id 时必填）")
+  .option("--root <nodeToken>", "只导出该节点为根的子树（覆盖 --space 节点链接中解析出的 token）")
+  .option("--branch <branch>", "推送分支（默认 main）")
+  .option("--interval <seconds>", "守护循环轮询间隔秒数（默认 120）")
+  .option("--inbox-url <url>", "写回收件箱链接（写入 manifest，供后续写回能力使用）")
+  .option("--once", "只跑一轮导出后退出（退出码：失败为 1，成功为 0），用于 cron 部署或冒烟验证")
+  .option("--full", "本轮强制全量对账，忽略 24h 窗口")
+  .description(
+    "把飞书知识空间导出为本地 Markdown 镜像仓库并持续同步（凭证走环境变量 KNOWBASE_LARK_APP_ID / KNOWBASE_LARK_APP_SECRET，不走命令行参数）"
+  )
+  .action(async (opts: Record<string, string | boolean | undefined>) => {
+    try {
+      process.exitCode = await cmdExporter(opts);
+    } catch (e) {
+      console.error(`✗ ${e instanceof Error ? e.message : String(e)}`);
+      process.exitCode = 1;
+    }
+  });
 
 // 隐藏命令：守护进程本体，由服务管理器拉起
 program

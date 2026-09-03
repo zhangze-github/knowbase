@@ -328,3 +328,61 @@ export async function runExportOnce(
 
   return result;
 }
+
+export interface DaemonOpts {
+  /** 轮询间隔，单位秒。 */
+  intervalSec: number;
+  /** 测试注入：默认真实 setTimeout。 */
+  sleep?: (ms: number) => Promise<void>;
+  /** 测试用：跑满这么多轮后 return（生产不传，无限循环）。 */
+  maxCycles?: number;
+}
+
+// SIGTERM/SIGINT 优雅退出的 handler 只注册一次：runExporterDaemon 在长跑进程里只会被
+// 调用一次，但测试里会反复调用（每次 maxCycles 跑完就 return），若不去重每次都会
+// 新增一个 process 级 listener，多轮测试后触发 Node 的 MaxListenersExceededWarning。
+let signalHandlersRegistered = false;
+
+/**
+ * 守护循环（spec：命令形态 + Task 8 brief）：`runExportOnce` → 记一行摘要日志 →
+ * sleep(intervalSec*1000) → 重复。runExportOnce 本身 never throw（见上方实现的兜底
+ * try/catch），这里再兜一层纯属防御性——防止未来改动不小心让它开始抛错时打断循环、
+ * 让整个 exporter 进程意外退出。
+ */
+export async function runExporterDaemon(
+  cfg: ExporterConfig,
+  deps: { client: LarkClientLike; logger: Logger; now?: () => Date },
+  opts: DaemonOpts
+): Promise<void> {
+  const { logger } = deps;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+
+  if (!signalHandlersRegistered) {
+    signalHandlersRegistered = true;
+    for (const sig of ["SIGTERM", "SIGINT"] as const) {
+      process.on(sig, () => {
+        logger.log(`exporter: 收到 ${sig}，优雅退出`);
+        process.exit(0);
+      });
+    }
+  }
+
+  let cycle = 0;
+  for (;;) {
+    let result: ExportResult;
+    try {
+      result = await runExportOnce(cfg, deps);
+    } catch (e) {
+      result = { exported: 0, moved: 0, removed: 0, committed: false, pushed: false, error: String(e) };
+      logger.log(`exporter: 守护循环捕获未预期异常（不应发生，runExportOnce 应已兜底）: ${String(e)}`);
+    }
+    logger.log(
+      `exporter: 周期完成 exported=${result.exported} moved=${result.moved} removed=${result.removed} ` +
+        `pushed=${result.pushed}${result.error ? ` error=${result.error}` : ""}`
+    );
+
+    cycle++;
+    if (opts.maxCycles !== undefined && cycle >= opts.maxCycles) return;
+    await sleep(opts.intervalSec * 1000);
+  }
+}
