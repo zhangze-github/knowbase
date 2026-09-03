@@ -72,6 +72,25 @@ export function makeBareOrigin(root: string): string {
   return bare;
 }
 
+/**
+ * 搭建：一个 bare 远端 + 一个空初始提交（仅 .gitkeep，无 union/忽略规则、无镜像文件）。
+ * exporter 首轮全量测试从这里 clone 出一个「全新 knowbase init 之后」的工作区。
+ * 与 makeBareOrigin 的区别只是文件更少——这里不需要预置任何 mirror 状态。
+ */
+export function makeEmptyOrigin(root: string): string {
+  const bare = path.join(root, "empty-origin.git");
+  g(root, "init", "--bare", "-b", "main", bare);
+
+  const seed = path.join(root, "empty-seed");
+  g(root, "clone", bare, seed);
+  setIdentity(seed);
+  fs.writeFileSync(path.join(seed, ".gitkeep"), "");
+  g(seed, "add", "-A");
+  g(seed, "commit", "-m", "init");
+  g(seed, "push", "origin", "HEAD:main");
+  return bare;
+}
+
 export function cloneWorkdir(bare: string, dir: string): void {
   const parent = path.dirname(dir);
   g(parent, "clone", bare, dir);

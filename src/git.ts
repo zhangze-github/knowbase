@@ -211,6 +211,11 @@ export function rm(dir: string, file: string): GitResult {
   return git(["rm", "-f", "--", file], { cwd: dir });
 }
 
+/** git mv（薄封装，exporter 移动节点导出路径用；调用方负责先 mkdirSync 目标目录）。 */
+export function mv(dir: string, from: string, to: string): GitResult {
+  return git(["mv", from, to], { cwd: dir });
+}
+
 export function addPath(dir: string, file: string): GitResult {
   return git(["add", "--", file], { cwd: dir });
 }
