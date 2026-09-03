@@ -56,6 +56,7 @@ describe("LarkClient", () => {
     });
     const r = await c.getNode("n");
     expect(r.node.node_token).toBe("n");
+    expect(r.space_id).toBe("spc");
     expect(hits).toBe(3);
   });
 
