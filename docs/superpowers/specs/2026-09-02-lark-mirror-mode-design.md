@@ -92,7 +92,7 @@ managed_by: knowbase-mirror
 
 ### 3.7 可选项：index.md 骨架生成
 
-根 `index.md` 在飞书中维护（正常镜像下来并照常注入 prompt block）。当飞书侧不存在根 index 文档时，exporter 可基于节点树自动生成一份目录骨架（标注 `auto-generated`），保证 KB 触发层（§9）始终存在。默认开启，可关。
+已被成员侧目录树注入取代——触发层不再依赖 index.md，exporter 无需生成骨架。
 
 ## 4. 成员侧：镜像模式（daemon 改动）
 
@@ -110,7 +110,7 @@ managed_by: knowbase-mirror
 | push-gate | 有 | 不参与 |
 | watcher 上行触发 | 有 | 仅用于检测「本地被改」 |
 | 下行 pull | 60s 轮询 | 不变 |
-| prompt 注入 / index.md 快照 | 有 | 有（规则更新见 §5） |
+| prompt 注入 / 目录树快照 | 有 | 有（规则更新见 §5） |
 | skills 分发 | 有 | 有（来源见 §8） |
 
 ### 4.3 本地改动处理（只读的执行）
@@ -161,10 +161,10 @@ managed_by: knowbase-mirror
 | 层 | 载体 | 触发方式 | 容量 |
 |---|---|---|---|
 | skill description | `skills/`（git） | 精确自动触发 | 几十条，精选 |
-| index.md 注入块 | 飞书根 index（镜像+注入） | 粗粒度导航 | 一张地图，8KB 截断 |
+| 目录树注入块 | 自动生成（成员侧） | 全库文件级地图 | 8KB 截断 |
 | KB 正文 | 飞书 → 镜像 | 被动 grep/检索 | 无限 |
 
-现有 `INDEX_MAX_BYTES` 截断、子目录 index 导航约定不变。
+树注入取代 index.md 快照：8KB 截断保留，index.md 不再是触发层、仅作为普通文档存在。
 
 ## 10. 边界与已知取舍
 
