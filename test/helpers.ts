@@ -121,3 +121,49 @@ export function denyPush(
 export function allowPush(bare: string): void {
   fs.rmSync(path.join(bare, "hooks", "pre-receive"), { force: true });
 }
+
+/**
+ * 搭建：一个 bare 远端 + 已推送镜像内容（.knowbase-mirror.json 在仓库根，
+ * 模拟 exporter 的产物）。返回 bare 仓库路径。
+ */
+export function makeMirrorOrigin(root: string): string {
+  const bare = path.join(root, "mirror-origin.git");
+  g(root, "init", "--bare", "-b", "main", bare);
+  const seed = path.join(root, "mirror-seed");
+  g(root, "clone", bare, seed);
+  setIdentity(seed);
+  fs.writeFileSync(
+    path.join(seed, ".knowbase-mirror.json"),
+    JSON.stringify(
+      {
+        version: 1,
+        last_sync_at: "2026-09-02T10:00:00+08:00",
+        agent_inbox_url: "https://x.feishu.cn/wiki/AgentInbox123",
+      },
+      null,
+      2
+    ) + "\n"
+  );
+  fs.writeFileSync(path.join(seed, ".gitignore"), ".knowbase-pause\n");
+  fs.mkdirSync(path.join(seed, "docs"), { recursive: true });
+  fs.writeFileSync(
+    path.join(seed, "docs", "guide.md"),
+    "---\nfeishu_url: https://x.feishu.cn/wiki/Doc1\n---\n\n# 指南\n"
+  );
+  g(seed, "add", "-A");
+  g(seed, "commit", "-m", "mirror: init");
+  g(seed, "push", "origin", "HEAD:main");
+  return bare;
+}
+
+/** 模拟 exporter 推送一次远端更新：改写文件并 push。 */
+export function pushMirrorUpdate(root: string, rel: string, content: string): void {
+  const seed = path.join(root, "mirror-seed");
+  g(seed, "pull", "origin", "main");
+  const full = path.join(seed, rel);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, content);
+  g(seed, "add", "-A");
+  g(seed, "commit", "-m", "mirror: update");
+  g(seed, "push", "origin", "HEAD:main");
+}

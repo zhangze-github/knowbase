@@ -355,3 +355,8 @@ export function cleanUntracked(dir: string, excludes: string[] = []): GitResult 
   for (const e of excludes) args.push("-e", e);
   return git(args, { cwd: dir });
 }
+
+/** 硬复位到指定 ref（镜像模式远端永远是对的，spec §4.2）。 */
+export function resetHard(dir: string, ref: string): GitResult {
+  return git(["reset", "--hard", ref], { cwd: dir });
+}

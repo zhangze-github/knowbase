@@ -88,6 +88,10 @@ export interface DaemonState {
   paused?: boolean;
   /** 无 push 权限而熔断时存在；恢复后清空。 */
   pushBlocked?: PushBlocked;
+  /** 镜像模式（仓库内存在 .knowbase-mirror.json，spec §4.1）。 */
+  mirror?: boolean;
+  /** 最近一次本地改动被丢弃的记录（镜像模式，spec §4.4）。 */
+  lastDiscard?: { at: string; files: string[] };
 }
 
 export function writeDaemonState(state: DaemonState): void {

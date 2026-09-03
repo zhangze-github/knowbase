@@ -16,6 +16,7 @@ import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
 import { syncSkills, summarizeByTool } from "./skills-sync.js";
 import { PushGate } from "./push-gate.js";
+import { isMirrorMode, setMirrorLock, discardLocalChanges } from "./mirror.js";
 
 export interface SyncDeps {
   logger: Logger;
@@ -42,6 +43,10 @@ export interface SyncResult {
   pushSkipped: boolean;
   /** 本轮生成的冲突副本文件（相对路径）。 */
   conflictCopies: string[];
+  /** 本轮走了镜像模式路径（仓库内存在 .knowbase-mirror.json）。 */
+  mirror: boolean;
+  /** 镜像模式下本轮被丢弃的本地改动（相对路径）。 */
+  discardedFiles: string[];
   /** 网络/致命步骤出错时的说明；引擎本身不抛异常。 */
   error?: string;
 }
@@ -58,6 +63,8 @@ function emptyResult(): SyncResult {
     pushDenied: false,
     pushSkipped: false,
     conflictCopies: [],
+    mirror: false,
+    discardedFiles: [],
   };
 }
 
@@ -148,6 +155,8 @@ function clearStaleLock(dir: string, logger: Logger): void {
  * 网络失败记录到 result.error，交由下一周期重试。
  */
 export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
+  if (isMirrorMode(cfg.dir)) return mirrorSyncOnce(cfg, deps);
+
   const { logger } = deps;
   const result = emptyResult();
   const dir = cfg.dir;
@@ -249,6 +258,74 @@ export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
     logger.log(`同步周期异常：${result.error}`);
   }
 
+  return result;
+}
+
+/**
+ * 镜像模式的同步周期（spec §4.2/§4.3）：严格单向下行。
+ * 永不 commit、永不 push、不触碰 pushGate；本地一切改动直接丢弃（§4.3，
+ * 定稿决策：不留底，改动入口只有飞书）；远端永远是对的，本地历史被人
+ * 手动动过就 reset --hard。与 syncOnce 同样 never throw。
+ */
+export function mirrorSyncOnce(cfg: Config, deps: SyncDeps): SyncResult {
+  const { logger } = deps;
+  const result = emptyResult();
+  result.mirror = true;
+  const dir = cfg.dir;
+
+  if (isPaused(dir)) {
+    result.paused = true;
+    logger.log("已暂停（存在 .knowbase-pause），跳过本轮");
+    return result;
+  }
+
+  try {
+    clearStaleLock(dir, logger);
+    // 锁是我们自己上的（spec §4.3），操作前先全部解锁，避免 checkout/clean 受阻
+    setMirrorLock(dir, false);
+
+    const discarded = discardLocalChanges(dir);
+    if (discarded.length > 0) {
+      result.discardedFiles = discarded;
+      logger.log(
+        `镜像目录被本地修改，已丢弃 ${discarded.length} 个文件的改动：${discarded.join(", ")}` +
+          `（修改请走飞书文档，见各文件头部 feishu_url）`
+      );
+    }
+
+    const f = git.fetch(dir, REMOTE);
+    if (!git.ok(f)) {
+      result.error = `fetch 失败：${f.stderr.trim() || f.stdout.trim()}`;
+      logger.log(result.error + "（下一周期重试）");
+      return result;
+    }
+
+    const upstream = `${REMOTE}/${cfg.branch}`;
+    if (
+      git.upstreamExists(dir, upstream) &&
+      (git.behindCount(dir, upstream) > 0 || git.aheadCount(dir, upstream) > 0)
+    ) {
+      // behind：正常跟进。ahead/分叉：有人绕过锁手动 commit 过——镜像仓库的
+      // 本地历史没有保留价值，硬复位即「丢弃改动」在提交层面的同一原则。
+      const r = git.resetHard(dir, upstream);
+      if (git.ok(r)) {
+        result.merged = true;
+      } else {
+        result.error = `reset 失败：${(r.stderr || r.stdout).trim()}`;
+        logger.log(result.error + "（下一周期重试）");
+      }
+    }
+  } catch (e) {
+    result.error = e instanceof Error ? e.message : String(e);
+    logger.log(`镜像同步周期异常：${result.error}`);
+  } finally {
+    // 无论成败都恢复上锁：解锁窗口越短，agent 撞进来的概率越低
+    try {
+      setMirrorLock(dir, true);
+    } catch {
+      // never throw
+    }
+  }
   return result;
 }
 
@@ -393,6 +470,10 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
         if (r.committed || r.merged || r.pushed) {
           state.lastSyncOkAt = state.lastCycleAt;
         }
+      }
+      state.mirror = r.mirror || undefined;
+      if (r.discardedFiles.length > 0) {
+        state.lastDiscard = { at: state.lastCycleAt!, files: r.discardedFiles };
       }
       state.pushBlocked = gate.snapshot();
       writeDaemonState(state);
