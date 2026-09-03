@@ -178,7 +178,7 @@ managed_by: knowbase-mirror
 
 - **转换器**（docx 块 → md）：单测 + 快照测试，覆盖各块类型与降级路径。飞书 API 以录制的响应 fixture 模拟。
 - **节点树 diff**（增/改/移/删 + git mv 判定）：纯函数单测。
-- **成员侧镜像模式**：复用现有 vitest 本地 bare 仓库基建——bare 仓库内放置 `.knowbase-mirror.json` 即可驱动模式切换；覆盖：自动识别、上行关闭、只读上锁/解锁、本地改动留底回滚、status 输出。
+- **成员侧镜像模式**：复用现有 vitest 本地 bare 仓库基建——bare 仓库内放置 `.knowbase-mirror.json` 即可驱动模式切换；覆盖：自动识别、上行关闭、只读上锁/解锁、本地改动直接丢弃（日志记文件名）、status 输出。
 - **exporter 循环**：never-throw 与限流退避的行为测试（注入故障的 fake client）。
 
 ## 12. 竞品与参考实现

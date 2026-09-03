@@ -146,6 +146,7 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 - **agent 提示词自动切换**：
   托管在 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` 的 knowbase 区块自动切换为镜像版指导。
   agent 被引导：读知识走本地 grep（速度快、无外网依赖），写知识使用飞书工具（确保入库），编辑前检查最新版本。
+  前置条件：成员机器需已配置 lark 工具链（`lark-doc` / `lark-wiki`）；未配置则 agent 只读，写入需人工在飞书完成。
 
 - **skills 目录保持 git 原生**：
   `skills/` 不受镜像同步影响，通过仓库 PR 维护，照常自动分发到全团队。
