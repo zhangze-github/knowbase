@@ -131,15 +131,19 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 
 ## 飞书镜像模式
 
-当知识库以飞书知识库为唯一真相源时（仓库由服务器上的 exporter 从飞书单向导出，仓库根带有 `.knowbase-mirror.json`），成员侧 knowbase 自动进入镜像模式，无需任何配置：
+当知识库以飞书知识库为唯一真相源时——仓库由服务器上的 exporter 从飞书单向导出，仓库根带有 `.knowbase-mirror.json`——成员侧 knowbase 自动进入镜像模式，无需任何配置。这种模式下，本地是一个只读的飞书同步镜像，所有知识管理的真相源回到飞书，通过 exporter 的定期导出保持与本地同步。
 
-- 本地目录是只读镜像：md 文件被设为只读；任何本地改动会在下个同步周期被直接丢弃（status 会给出警告）。修改知识请打开对应文件头部 frontmatter 里的 `feishu_url` 去飞书编辑；新增知识写到飞书知识库的「Agent 沉淀」目录。
-- agent 提示词区块自动切换为镜像版引导：读走本地 grep，写走飞书文档工具。
-- `skills/` 目录不走飞书：它是 git 原生区，通过仓库 PR 维护，照常自动分发。
-- `knowbase status` 额外显示镜像更新时间与全量对账时间；超过 30 分钟未更新会提示 exporter 可能停摆。
-- 权限注意：飞书侧的细粒度可见性不会带进镜像——能 clone 仓库的人可见全部导出内容，请只镜像对团队全员开放的 space（详见 docs/superpowers/specs/2026-09-02-lark-mirror-mode-design.md §10）。
+**只读镜像与改动丢弃**：进入镜像模式后，知识库内所有 `.md` 文件被设为只读（0o444），防止本地意外编辑。任何本地改动（即使已提交）会在下个同步周期被 git reset 回远端最新版本，`knowbase status` 会给出清晰的警告。这样设计是为了让飞书成为唯一真相源，避免本地编辑与飞书编辑的冲突。修改一篇已有的知识，请打开该文件头部 YAML frontmatter 中的 `feishu_url` 链接去飞书编辑；新增知识则写到飞书知识库的「Agent 沉淀」目录。
 
-exporter 与一次性迁移工具（`knowbase exporter` / `knowbase migrate-to-lark`）见后续版本。
+**agent 提示词自动适配**：托管在 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` 中的 knowbase 区块会自动切换为镜像版的使用指导。在镜像仓库中，agent 被引导：读知识时走本地 grep（速度快、无外网依赖），写知识时使用飞书文档工具（保证知识入库到飞书），编辑前检查最新版本避免基于过期信息修改。
+
+**skills 不走飞书**：`skills/` 目录是 git 原生区（spec §8），它的来源与演进通过团队在仓库里的 PR 维护，不受镜像同步影响，照常自动分发到全团队成员的本机。这使得团队工作流可执行脚本与知识库内容可以独立维护。
+
+**镜像新鲜度与 exporter 监控**：`knowbase status` 会额外显示镜像的最后同步时间（`last_sync_at`）与上次全量对账时间（`last_full_check_at`）。超过 30 分钟未更新会显示警告，提示 exporter 可能停摆或网络连接中断。这让团队能及时发现导出流程的问题。
+
+**权限与可见性注意**：飞书知识库的细粒度可见性设置（文件夹、页面级权限）无法通过 git 导出带进镜像——镜像中的内容是纯文本，能 clone 仓库的所有人都能看到全部导出内容。因此只应该镜像对整个团队都开放的 knowledge space（详见 docs/superpowers/specs/2026-09-02-lark-mirror-mode-design.md §10）。
+
+exporter 工具与一次性迁移工具（`knowbase exporter` / `knowbase migrate-to-lark`）的实现见后续版本。
 
 ## 开机自启机制
 
