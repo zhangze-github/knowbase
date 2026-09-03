@@ -11,6 +11,7 @@ import {
   isPaused,
 } from "../config.js";
 import * as git from "../git.js";
+import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
 import { readIndex, INDEX_MAX_BYTES } from "../agent-config.js";
 import {
@@ -63,10 +64,14 @@ export function cmdStatus(): number {
     return 0;
   }
   const cfg = loadConfig();
+  const mirrorMode = isMirrorMode(cfg.dir);
   const anomalies: string[] = [];
 
   console.log(`知识库目录：${cfg.dir}`);
   console.log(`远端仓库：  ${cfg.repoUrl}  (分支 ${cfg.branch})`);
+  if (mirrorMode) {
+    console.log("模式：      飞书镜像（只读，真相源在飞书知识库）");
+  }
   console.log(`配置文件：  ${configPath()}`);
   console.log("");
 
@@ -94,6 +99,28 @@ export function cmdStatus(): number {
   console.log(`上次内容同步：${fmtTime(state?.lastSyncOkAt)}`);
   if (state?.lastError) {
     console.log(`最近一次错误：${state.lastError}`);
+  }
+  if (mirrorMode) {
+    const fresh = mirrorFreshness(readMirrorManifest(cfg.dir), new Date());
+    if (fresh.unreadable) {
+      console.log("镜像清单：  ✗ .knowbase-mirror.json 无法解析");
+      anomalies.push("镜像清单损坏——exporter 侧可能异常，请联系知识库管理员。");
+    } else {
+      console.log(`镜像更新：  ${fmtTime(fresh.lastSyncAt ?? undefined)}`);
+      console.log(`全量对账：  ${fmtTime(fresh.lastFullCheckAt ?? undefined)}`);
+      if (fresh.stale) {
+        anomalies.push(
+          "镜像已超过 30 分钟未更新——exporter 可能停摆（本地内容仍可读），请联系知识库管理员。"
+        );
+      }
+    }
+    if (state?.lastDiscard) {
+      const d = state.lastDiscard;
+      const head = d.files.slice(0, 5).join(", ");
+      console.log(
+        `本地改动丢弃：${fmtTime(d.at)}，${d.files.length} 个文件（${head}${d.files.length > 5 ? " …" : ""}）——镜像只读，修改请走飞书`
+      );
+    }
   }
 
   // 残留锁检测（正常时锁会被守护进程 10 分钟阈值自愈；这里提前给出可见提示）
@@ -125,12 +152,14 @@ export function cmdStatus(): number {
     uncommitted = git.changedFiles(cfg.dir).length;
     ahead = git.aheadCount(cfg.dir, `origin/${cfg.branch}`);
   }
-  console.log(`本地未提交改动：${uncommitted} 个文件`);
-  console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
+  if (!mirrorMode) {
+    console.log(`本地未提交改动：${uncommitted} 个文件`);
+    console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
+  }
 
   // push 熔断（无写权限）——必须醒目：用户看到的「本地领先 N 个提交」
   // 在这种状态下意味着这些提交永远推不出去。
-  if (state?.pushBlocked) {
+  if (!mirrorMode && state?.pushBlocked) {
     const pb = state.pushBlocked;
     console.log("");
     console.log(`⚠ 无 push 权限：本地 ${ahead} 个提交只在本机，未同步给团队。`);

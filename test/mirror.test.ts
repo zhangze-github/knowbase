@@ -8,6 +8,8 @@ import {
   readMirrorManifest,
   setMirrorLock,
   discardLocalChanges,
+  mirrorFreshness,
+  MIRROR_STALE_MS,
 } from "../src/mirror.js";
 
 describe("镜像清单与模式识别", () => {
@@ -139,5 +141,39 @@ describe("discardLocalChanges", () => {
   it("工作区干净时返回空数组", () => {
     const dir = makeRepo();
     expect(discardLocalChanges(dir)).toEqual([]);
+  });
+});
+
+describe("mirrorFreshness", () => {
+  const now = new Date("2026-09-02T12:00:00+08:00");
+
+  it("30 分钟内为 fresh", () => {
+    const f = mirrorFreshness(
+      { version: 1, last_sync_at: "2026-09-02T11:45:00+08:00" },
+      now
+    );
+    expect(f.stale).toBe(false);
+    expect(f.unreadable).toBe(false);
+  });
+
+  it("超过 30 分钟为 stale", () => {
+    const f = mirrorFreshness(
+      { version: 1, last_sync_at: "2026-09-02T11:00:00+08:00" },
+      now
+    );
+    expect(f.stale).toBe(true);
+  });
+
+  it("manifest 为 null（损坏/缺失）：unreadable 且 stale", () => {
+    const f = mirrorFreshness(null, now);
+    expect(f.unreadable).toBe(true);
+    expect(f.stale).toBe(true);
+  });
+
+  it("last_sync_at 缺失或非法时间：stale", () => {
+    expect(mirrorFreshness({ version: 1 }, now).stale).toBe(true);
+    expect(
+      mirrorFreshness({ version: 1, last_sync_at: "不是时间" }, now).stale
+    ).toBe(true);
   });
 });

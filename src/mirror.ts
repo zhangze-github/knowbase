@@ -133,3 +133,33 @@ export function discardLocalChanges(dir: string): string[] {
   // 过滤掉暂停标记，避免调用方误报其被丢弃（实际被 -e 排除保留）
   return expandedFiles.filter((f) => f !== PAUSE_MARKER);
 }
+
+/** exporter 停摆判定阈值（spec §4.4）：导出周期 2 分钟，30 分钟未更新即异常。 */
+export const MIRROR_STALE_MS = 30 * 60 * 1000;
+
+export interface MirrorFreshness {
+  /** 清单缺失或损坏（isMirrorMode 为 true 但读不出内容）。 */
+  unreadable: boolean;
+  lastSyncAt: string | null;
+  lastFullCheckAt: string | null;
+  /** exporter 疑似停摆：last_sync_at 缺失、非法或超过阈值。 */
+  stale: boolean;
+}
+
+export function mirrorFreshness(
+  manifest: MirrorManifest | null,
+  now: Date
+): MirrorFreshness {
+  if (!manifest) {
+    return { unreadable: true, lastSyncAt: null, lastFullCheckAt: null, stale: true };
+  }
+  const lastSyncAt = manifest.last_sync_at ?? null;
+  const t = lastSyncAt ? Date.parse(lastSyncAt) : NaN;
+  const stale = !Number.isFinite(t) || now.getTime() - t > MIRROR_STALE_MS;
+  return {
+    unreadable: false,
+    lastSyncAt,
+    lastFullCheckAt: manifest.last_full_check_at ?? null,
+    stale,
+  };
+}
