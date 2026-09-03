@@ -170,6 +170,15 @@ export async function runExportOnce(
 
     // 2. 拉整棵树 → 规划路径 → 与旧状态 diff
     const nodes = await client.listAllSpaceNodes(cfg.spaceId, cfg.rootToken);
+    if (nodes.length === 0) {
+      // 真实踩坑：bot 未加入知识空间时，列 space 顶层报 131006，但按 parent_node_token
+      // 列子节点飞书**不报错、返回空列表**——exporter 会静默导出 0 个，极难定位。
+      // 明确警告而不视为错误：空知识库/空子树也是合法状态，下轮照常重试。
+      logger.log(
+        "⚠ 知识库列不到任何节点：若知识库非空，请确认应用机器人已被加为该知识空间成员" +
+          "（知识库设置 → 成员 → 添加成员里搜索应用名）；bot 无权限时子树列举表现为空列表而非报错"
+      );
+    }
     const planned = planPaths(nodes, cfg.rootToken);
     // mention_doc.token 的命名空间不总是 node_token：飞书历史上对 wiki 文档的 mention
     // 引用有时给的是 obj_token（fixture 形状踩过坑，真实运行需验收）。额外建一张按

@@ -266,6 +266,12 @@ export async function cmdExporter(opts: Record<string, string | boolean | undefi
       `✓ 完成：导出 ${result.exported}  移动 ${result.moved}  删除 ${result.removed}` +
         `${result.pushed ? "  已推送" : result.committed ? "  已提交（未推送）" : ""}`
     );
+    if (result.exported === 0 && result.moved === 0 && result.removed === 0) {
+      // 冒烟场景最常见的坑：bot 未加入知识空间时飞书对子树列举返回空列表而非报错
+      console.log(
+        "  提示：若为首次运行且知识库非空，请检查应用机器人是否已加入该知识空间（知识库设置 → 成员 → 添加成员）"
+      );
+    }
     return 0;
   }
 
