@@ -25,7 +25,7 @@ export interface ExporterConfig {
   host: string;
   rootToken?: string;
   inboxUrl?: string;
-  /** 全量对账间隔 ms，默认 24h（Task 7 增量对账触发全量兜底用；本任务恒为全量）。 */
+  /** 全量对账间隔 ms，默认 24h：manifest.last_full_check_at 缺失或早于 now-fullCheckMs 时，本轮忽略 obj_edit_time、对所有已知节点重渲染比 hash 兜底漏检（spec §3.4）。 */
   fullCheckMs?: number;
 }
 
@@ -38,13 +38,14 @@ export interface ExportResult {
   error?: string;
 }
 
-/** 默认 24h（供 Task 7 消费；本任务不读取此值）。 */
+/** 默认 24h 全量对账间隔。 */
 export const DEFAULT_FULL_CHECK_MS = 24 * 60 * 60 * 1000;
 
 /**
  * skills/ 防御（spec §8）：写盘/mv/删除的目标路径若落在 skills/ 目录内一律跳过。
- * 结构上 planPaths 的产物不会落在 skills/ 下（不共享同一个命名空间），
- * 这里是 toRemove 清理「旧状态」时的最后一道防线，防止误删被分发到成员侧的技能目录。
+ * 标题字面就是 "skills" 的 wiki 节点在 planPaths 的产物里是真实可达的路径
+ * （用户完全可能建一个叫 skills 的页面/目录），这里是最后一道防线，防止写穿/
+ * 误删到分发给成员侧的技能目录。
  */
 function isProtectedPath(p: string): boolean {
   const norm = p.replace(/\\/g, "/");
@@ -85,6 +86,31 @@ function rmEmptyDirsUpward(repoDir: string, startDir: string): void {
       break; // 非空或权限问题：忽略，停止向上清理
     }
     dir = path.dirname(dir);
+  }
+}
+
+/**
+ * 尝试把单个节点从旧路径移到新路径：先 git mv，失败降级 fs.rename，两者都失败返回
+ * false。抽成独立函数是为了让「移动失败」的收尾逻辑（Important#2：跳过本轮导出，
+ * 留给下轮和移动一起重试）能被纯逻辑单测覆盖，不必在集成测试里费力构造真实的
+ * git mv 失败场景。
+ */
+export function tryMoveNode(
+  from: string,
+  to: string,
+  logger: Logger,
+  ops: {
+    gitMv: (from: string, to: string) => boolean;
+    rename: (from: string, to: string) => void;
+  }
+): boolean {
+  if (ops.gitMv(from, to)) return true;
+  try {
+    ops.rename(from, to);
+    return true;
+  } catch (e) {
+    logger.log(`exporter: 移动失败，跳过 ${from} -> ${to}: ${String(e)}`);
+    return false;
   }
 }
 
@@ -139,7 +165,10 @@ export async function runExportOnce(
     const planned = planPaths(nodes, cfg.rootToken);
     const diff = diffTree(planned, manifest.nodes);
 
-    // 3. toMove：git mv，失败降级 fs.renameSync，均失败则跳过（下轮按「未移动」重新计算 diff）
+    // 3. toMove：git mv，失败降级 fs.renameSync，均失败则记入 moveSkip（Important#2：
+    //    该节点本轮不再导出——否则 toExport 会在新路径写出内容，旧文件因为 node_token
+    //    仍「在树上」永远等不到 toRemove 清理，变成永久孤儿。留给下轮把移动和导出一起重试。
+    const moveSkip = new Set<string>();
     for (const m of diff.toMove) {
       const token = m.to.node.node_token;
       if (isProtectedPath(m.from) || isProtectedPath(m.to.path)) {
@@ -152,28 +181,51 @@ export async function runExportOnce(
         fs.mkdirSync(path.dirname(toAbs), { recursive: true });
       } catch (e) {
         logger.log(`exporter: mkdir 失败，跳过移动 ${m.to.path}: ${String(e)}`);
+        moveSkip.add(token);
         continue;
       }
-      let moved = ok(gitMv(cfg.repoDir, m.from, m.to.path));
-      if (!moved) {
-        try {
-          fs.renameSync(fromAbs, toAbs);
-          moved = true;
-        } catch (e) {
-          logger.log(`exporter: 移动失败，跳过 ${m.from} -> ${m.to.path}: ${String(e)}`);
-        }
-      }
+      const moved = tryMoveNode(m.from, m.to.path, logger, {
+        gitMv: (f, t) => ok(gitMv(cfg.repoDir, f, t)),
+        rename: (f, t) => fs.renameSync(path.join(cfg.repoDir, f), path.join(cfg.repoDir, t)),
+      });
       if (moved) {
         if (manifest.nodes[token]) manifest.nodes[token].path = m.to.path;
         result.moved++;
+      } else {
+        moveSkip.add(token);
       }
     }
 
-    // 4. toExport：docx 渲染真实正文，其余占位；hash 相同跳过写盘但仍推进 manifest（幂等）
+    // 4. toExport：diffTree 命中的（新增/edit_time 变化）之外，若本轮触达全量对账窗口，
+    //    再把「已存在且 edit_time 未变」的节点也纳入重渲染比 hash（spec §3.4 兜底漏检：
+    //    比如 API 偶发漏报 edit_time 变化）。reconcileOnly 的节点 hash 相同则完全跳过——
+    //    不写盘、不计数、不动 manifest，否则连续两轮全量对账永远无法收敛到心跳提交。
+    const fullCheckMs = cfg.fullCheckMs ?? DEFAULT_FULL_CHECK_MS;
+    const dueFull =
+      !manifest.last_full_check_at ||
+      now().getTime() - new Date(manifest.last_full_check_at).getTime() >= fullCheckMs;
+
+    const exportTokens = new Set(diff.toExport.map((p) => p.node.node_token));
+    const exportItems: { p: PlannedNode; reconcileOnly: boolean }[] = diff.toExport.map((p) => ({
+      p,
+      reconcileOnly: false,
+    }));
+    if (dueFull) {
+      for (const [token, p] of planned) {
+        if (exportTokens.has(token)) continue; // 已经在正常 diff 里，不重复处理
+        if (!manifest.nodes[token]) continue; // 新节点已由 diff.toExport 覆盖
+        exportItems.push({ p, reconcileOnly: true });
+      }
+    }
+
     let newCount = 0;
     let reexportCount = 0;
-    for (const p of diff.toExport) {
+    for (const { p, reconcileOnly } of exportItems) {
       const token = p.node.node_token;
+      if (moveSkip.has(token)) {
+        logger.log(`exporter: 移动未完成，本轮跳过导出 ${token} (${p.path})，留待下轮重试`);
+        continue;
+      }
       if (isProtectedPath(p.path)) {
         logger.log(`exporter: 跳过受保护路径导出 ${p.path}`);
         continue;
@@ -192,7 +244,11 @@ export async function runExportOnce(
       const hash = contentHash(body, p.node.title);
       const existing = manifest.nodes[token];
       const wasNew = !existing;
-      if (!existing || existing.hash !== hash) {
+      const changed = !existing || existing.hash !== hash;
+
+      if (reconcileOnly && !changed) continue; // 全量对账兜底项：内容真的没变，不留任何痕迹
+
+      if (changed) {
         const abs = path.join(cfg.repoDir, p.path);
         try {
           fs.mkdirSync(path.dirname(abs), { recursive: true });
@@ -226,9 +282,10 @@ export async function runExportOnce(
     }
 
     // 6. 推进 last_sync_at（成员侧 status 新鲜度依赖它持续推进，spec §3.4/§4.4）；
-    //    本任务 runExportOnce 恒为全量对账，一并推进 last_full_check_at 供 Task 7 消费
+    //    last_full_check_at 只在本轮真的做了全量对账时才推进——否则从未触达
+    //    fullCheckMs 窗口就被提前刷新，全量兜底永远不会被真正触发。
     manifest.last_sync_at = now().toISOString();
-    manifest.last_full_check_at = now().toISOString();
+    if (dueFull) manifest.last_full_check_at = now().toISOString();
     writeExporterManifest(cfg.repoDir, manifest);
 
     // 7. git 发布
@@ -238,12 +295,14 @@ export async function runExportOnce(
         result.error = `git add 失败: ${addRes.stderr.trim() || addRes.stdout.trim()}`;
         logger.log(`exporter: ${result.error}`);
       } else {
-        const contentChanged = newCount > 0 || reexportCount > 0 || result.removed > 0 || result.moved > 0;
-        // 无内容变更（仅 last_sync_at 变化）时用心跳提交，避免看起来像空转，
-        // 但仍然提交推送——成员侧新鲜度判定就靠这个持续推进（spec §3.4/§4.4，接受心跳提交）
-        const message = contentChanged
-          ? `mirror: +${newCount} ~${reexportCount} -${result.removed}`
-          : `mirror: heartbeat`;
+        // 提交消息按「+新增 ~重导 -删除 →移动」拼段，计数为 0 的段省略；
+        // 全为 0（含移动）才是心跳提交（Important#1：仅移动的一轮此前会被误判为心跳）。
+        const segments: string[] = [];
+        if (newCount > 0) segments.push(`+${newCount}`);
+        if (reexportCount > 0) segments.push(`~${reexportCount}`);
+        if (result.removed > 0) segments.push(`-${result.removed}`);
+        if (result.moved > 0) segments.push(`→${result.moved}`);
+        const message = segments.length > 0 ? `mirror: ${segments.join(" ")}` : `mirror: heartbeat`;
         const commitRes = commit(cfg.repoDir, message);
         if (!ok(commitRes)) {
           result.error = `git commit 失败: ${commitRes.stderr.trim() || commitRes.stdout.trim()}`;
