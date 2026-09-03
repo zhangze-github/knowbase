@@ -341,11 +341,6 @@ export function remoteUrl(dir: string, remote: string): string | null {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
-/** 丢弃工作区全部已跟踪文件的改动。 */
-export function checkoutAll(dir: string): GitResult {
-  return git(["checkout", "--", "."], { cwd: dir });
-}
-
 /**
  * 删除未跟踪文件与目录。刻意不带 -x：被 .gitignore 忽略的文件
  * （.knowbase-pause 等本机状态）不属于「越权写入的内容」。

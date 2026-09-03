@@ -106,10 +106,25 @@ describe("discardLocalChanges", () => {
     const dir = makeRepo();
     write(dir, "a.md", "被 agent 改坏\n");
     write(dir, "new-dir/rogue.md", "越权新增\n");
-    const files = discardLocalChanges(dir);
+    const { files, error } = discardLocalChanges(dir);
+    expect(error).toBeUndefined();
     expect(files.sort()).toEqual(["a.md", "new-dir/rogue.md"]);
     expect(read(dir, "a.md")).toBe("原文\n");
     expect(fs.existsSync(path.join(dir, "new-dir"))).toBe(false);
+  });
+
+  it("staged 改动（git add 未 commit）同样被丢弃：改用 reset --hard 而非 checkout", () => {
+    const dir = makeRepo();
+    write(dir, "a.md", "被 agent 改坏并 add\n");
+    write(dir, "new-dir/rogue.md", "越权新增并 add\n");
+    g(dir, "add", "-A"); // 关键：stage 但不 commit —— checkout -- . 恢复不了这种改动
+    const { files, error } = discardLocalChanges(dir);
+    expect(error).toBeUndefined();
+    expect(files.sort()).toEqual(["a.md", "new-dir/rogue.md"]);
+    expect(read(dir, "a.md")).toBe("原文\n");
+    expect(fs.existsSync(path.join(dir, "new-dir"))).toBe(false);
+    // reset --hard 后 index 也应回到 HEAD，工作区干净
+    expect(g(dir, "status", "--porcelain").stdout.trim()).toBe("");
   });
 
   it("暂停标记与被忽略文件不被清掉（已在 .gitignore）", () => {
@@ -137,7 +152,7 @@ describe("discardLocalChanges", () => {
     // 写入暂停标记（此时会被 changedFiles 看到）与真实改动
     write(dir, ".knowbase-pause", "");
     write(dir, "c.md", "新增\n");
-    const files = discardLocalChanges(dir);
+    const { files } = discardLocalChanges(dir);
 
     // 暂停标记被保留在磁盘上
     expect(fs.existsSync(path.join(dir, ".knowbase-pause"))).toBe(true);
@@ -146,9 +161,19 @@ describe("discardLocalChanges", () => {
     expect(files).toContain("c.md");
   });
 
-  it("工作区干净时返回空数组", () => {
+  it("工作区干净时返回空数组、无 error", () => {
     const dir = makeRepo();
-    expect(discardLocalChanges(dir)).toEqual([]);
+    expect(discardLocalChanges(dir)).toEqual({ files: [] });
+  });
+
+  it("空仓库（HEAD 未诞生）：reset --hard HEAD 失败，按失败路径处理", () => {
+    const dir = tmpDir("discard-empty-repo");
+    g(dir, "init", "-b", "main", ".");
+    setIdentity(dir);
+    write(dir, "a.md", "未提交内容\n"); // 未跟踪文件即可触发 changedFiles 非空
+    const { files, error } = discardLocalChanges(dir);
+    expect(files).toEqual([]);
+    expect(error).toBeTruthy();
   });
 });
 

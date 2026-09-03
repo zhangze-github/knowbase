@@ -89,15 +89,27 @@ export function setMirrorLock(dir: string, locked: boolean): number {
   return changed;
 }
 
+export interface DiscardResult {
+  /** 被丢弃改动的文件相对路径（暂停标记已过滤）。 */
+  files: string[];
+  /** 任一 git 写操作失败时的说明；此时 files 恒为空，调用方应上报并留待下轮重试。 */
+  error?: string;
+}
+
 /**
  * 丢弃镜像目录内的一切本地改动（spec §4.3 兜底）：镜像目录内不存在合法的
  * 本地修改，正确的修改入口只有飞书，因此直接丢弃、不留底；被丢弃的文件名
  * 由调用方记日志与 status 警告。-e 兜底 exporter 忘记把暂停标记种进
  * .gitignore 的情况——暂停标记是成员本机状态，误删等于静默取消用户的暂停。
+ *
+ * 用 `reset --hard HEAD`（而非 `checkout -- .`）+ cleanUntracked：checkout
+ * 只从 index 恢复工作区，stage 过但未 commit 的改动（git add 之后）不会被
+ * 丢弃却已经上报「已丢弃」——reset --hard 会把 index 一并复位，staged 的
+ * 修改/新增都能正确回退（新增文件会被判定为不在 HEAD 中而一并移除）。
  */
-export function discardLocalChanges(dir: string): string[] {
+export function discardLocalChanges(dir: string): DiscardResult {
   const files = git.changedFiles(dir);
-  if (files.length === 0) return [];
+  if (files.length === 0) return { files: [] };
 
   // git status 对完全未跟踪的目录，有时会显示目录名而不是文件名，需要展开
   const expandedFiles: string[] = [];
@@ -128,10 +140,18 @@ export function discardLocalChanges(dir: string): string[] {
     }
   }
 
-  git.checkoutAll(dir);
-  git.cleanUntracked(dir, [PAUSE_MARKER]);
+  // 空仓库（HEAD 未诞生）上 reset --hard HEAD 必然失败——按失败路径处理，
+  // 交由调用方记录并留待下一周期（届时 HEAD 多半已由 fetch/reset 建立）。
+  const r = git.resetHard(dir, "HEAD");
+  if (!git.ok(r)) {
+    return { files: [], error: `reset 失败：${(r.stderr || r.stdout).trim()}` };
+  }
+  const c = git.cleanUntracked(dir, [PAUSE_MARKER]);
+  if (!git.ok(c)) {
+    return { files: [], error: `clean 失败：${(c.stderr || c.stdout).trim()}` };
+  }
   // 过滤掉暂停标记，避免调用方误报其被丢弃（实际被 -e 排除保留）
-  return expandedFiles.filter((f) => f !== PAUSE_MARKER);
+  return { files: expandedFiles.filter((f) => f !== PAUSE_MARKER) };
 }
 
 /** exporter 停摆判定阈值（spec §4.4）：导出周期 2 分钟，30 分钟未更新即异常。 */
