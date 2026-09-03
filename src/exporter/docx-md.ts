@@ -193,7 +193,9 @@ function appendChildren(line: string, children: string[], depth: number, w: Walk
 
 /**
  * 渲染一组兄弟块 id（深度优先，flat map 按 children 顺序查）。维护 Ordered 的连续
- * 编号计数器——遇到非 Ordered 块即重置，保证「打断后重新从 1 计数」；
+ * 编号计数器——遇到「真实产出可见内容」的非 Ordered 块才重置，保证「打断后重新从 1
+ * 计数」；不可见块（如飞书里两个列表项之间敲的空段落，渲染为空串）既不进输出、也不
+ * 影响编号——它对读者不存在，不应被当成「打断」。
  * 相邻两个列表块（Bullet/Ordered/TodoList）之间单换行相连，其余块间空行分隔。
  */
 function renderBlocks(ids: string[], depth: number, w: Walker): string {
@@ -207,12 +209,13 @@ function renderBlocks(ids: string[], depth: number, w: Walker): string {
     if (!block) continue;
     w.visited.add(id);
 
-    orderedCounter = block.block_type === BlockType.Ordered ? orderedCounter + 1 : 0;
-    const rendered = renderBlock(block, depth, orderedCounter, w);
-    if (rendered === "") {
-      prevType = block.block_type;
-      continue;
-    }
+    const isOrdered = block.block_type === BlockType.Ordered;
+    const candidateCounter = isOrdered ? orderedCounter + 1 : orderedCounter;
+    const rendered = renderBlock(block, depth, candidateCounter, w);
+    // 纯空白（含只有缩进 pad 的嵌套空块）视同不可见：不进输出、不影响编号/间距判定
+    if (rendered.trim() === "") continue;
+
+    orderedCounter = isOrdered ? candidateCounter : 0;
 
     if (parts.length === 0) {
       parts.push(rendered);

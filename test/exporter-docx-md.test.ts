@@ -64,4 +64,21 @@ describe("基础块渲染", () => {
     expect(md).toContain("$E=mc^2$");
     expect(md).toContain("@ou_1");
   });
+
+  it("不可见空块不打断 ordered 编号，也不产出纯空白行", () => {
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "o1", block_type: 13, ordered: { elements: [run("A")] } },
+      { block_id: "empty", block_type: 2, text: { elements: [] } },
+      { block_id: "o2", block_type: 13, ordered: { elements: [run("B")] } },
+      { block_id: "b1", block_type: 12, bullet: { elements: [run("项")] }, children: ["e1"] },
+    ).concat([
+      { block_id: "e1", block_type: 2, text: { elements: [] } },
+    ]) as DocxBlock[], CTX);
+    expect(md).toContain("1. A");
+    expect(md).toContain("2. B");
+    // 空段落被空块打断编号的旧 bug 会在此处产出两个 "1."
+    expect(md).not.toMatch(/1\. A[\s\S]*1\. B/);
+    // 嵌套空块（depth>0）不应产出只含缩进空格的空白行
+    expect(md.split("\n").some((l) => l.length > 0 && l.trim() === "")).toBe(false);
+  });
 });
