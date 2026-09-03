@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
 import { describe, it, expect } from "vitest";
 import { tmpDir, g, makeEmptyOrigin, cloneWorkdir, read, denyPush, allowPush } from "./helpers.js";
 import { Logger } from "../src/config.js";
@@ -143,13 +142,6 @@ describe("runExportOnce", () => {
     expect(Object.keys(manifest.nodes).sort()).toEqual(["A", "B"]);
   });
 });
-
-/** macOS chflags：给文件打上不可变标记，让 rename/unlink 在文件系统层面必然失败
- * （即便是 root 默认也拒绝），用来在集成测试里真实制造 git mv + fs.rename 双双
- * 失败的场景，而不必对 fs/git 模块打桩。 */
-function setImmutable(p: string, on: boolean): void {
-  spawnSync("chflags", [on ? "uchg" : "nouchg", p]);
-}
 
 /**
  * 每次调用推进 1ms 的时钟，供「多轮无内容变化」的用例使用：manifest.last_sync_at
@@ -394,49 +386,57 @@ describe("增量周期与全量对账", () => {
     expect(bareHead).toBe(localHead);
   });
 
-  it("移动失败（源目录不可写）→ 不产生孤儿文件，节点留待下轮重试", async () => {
-    const root = tmpDir("exp7-move-fail");
-    const bare = makeEmptyOrigin(root);
-    const dir = path.join(root, "work");
-    cloneWorkdir(bare, dir);
+  // chmod 语义在 Windows 上不可靠（ACL 而非 rwx 位），无法保证真实阻断 rename/unlink，
+  // 与仓库里 mirror.test.ts / skills-sync.test.ts 的既有惯例一致，跳过而非伪造通过。
+  it.skipIf(process.platform === "win32")(
+    "移动失败（源目录不可写）→ 不产生孤儿文件，节点留待下轮重试",
+    async () => {
+      const root = tmpDir("exp7-move-fail");
+      const bare = makeEmptyOrigin(root);
+      const dir = path.join(root, "work");
+      cloneWorkdir(bare, dir);
 
-    const P = node({ node_token: "P", obj_token: "oP", title: "父", has_child: true });
-    const C = node({ node_token: "C", obj_token: "oC", title: "子", parent_node_token: "P" });
-    const client = new FakeClient([P, C], { oP: textBlocks("父正文"), oC: textBlocks("子正文") });
-    const cfg: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
-    const now = () => new Date("2026-09-03T00:00:00.000Z");
+      const P = node({ node_token: "P", obj_token: "oP", title: "父", has_child: true });
+      const C = node({ node_token: "C", obj_token: "oC", title: "子", parent_node_token: "P" });
+      const client = new FakeClient([P, C], { oP: textBlocks("父正文"), oC: textBlocks("子正文") });
+      const cfg: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
+      const now = () => new Date("2026-09-03T00:00:00.000Z");
 
-    await runExportOnce(cfg, { client, logger: quietLogger(root), now });
-    const oldAbs = path.join(dir, "父", "子.md");
-    expect(fs.existsSync(oldAbs)).toBe(true);
+      await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+      const parentDir = path.join(dir, "父");
+      const oldAbs = path.join(parentDir, "子.md");
+      expect(fs.existsSync(oldAbs)).toBe(true);
 
-    // 子节点挪到根目录，且内容也同时变化（同时触发 toMove 与 toExport）
-    client.nodes = [P, { ...C, parent_node_token: "", obj_edit_time: "200" }];
-    client.blocksByObjToken["oC"] = textBlocks("子正文-改");
+      // 子节点挪到根目录，且内容也同时变化（同时触发 toMove 与 toExport）
+      client.nodes = [P, { ...C, parent_node_token: "", obj_edit_time: "200" }];
+      client.blocksByObjToken["oC"] = textBlocks("子正文-改");
 
-    setImmutable(oldAbs, true); // 让 git mv 与 fs.rename 都必然失败
-    try {
-      const r2 = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
-      expect(r2.error).toBeUndefined(); // 单节点移动失败不是致命错误
-      expect(r2.moved).toBe(0);
-      expect(r2.exported).toBe(0); // 修复点：跳过导出，不产生孤儿
-      expect(fs.existsSync(oldAbs)).toBe(true); // 旧文件还在
-      expect(fs.existsSync(path.join(dir, "子.md"))).toBe(false); // 新文件没被创建
+      // 去掉源目录的写权限：unlink/rename 源目录里的条目都需要目录本身的写权限，
+      // 只读+可执行（0o555）足以让 git mv 与 fs.rename 双双失败，且跨平台（非 Windows）通用。
+      fs.chmodSync(parentDir, 0o555);
+      try {
+        const r2 = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+        expect(r2.error).toBeUndefined(); // 单节点移动失败不是致命错误
+        expect(r2.moved).toBe(0);
+        expect(r2.exported).toBe(0); // 修复点：跳过导出，不产生孤儿
+        expect(fs.existsSync(oldAbs)).toBe(true); // 旧文件还在
+        expect(fs.existsSync(path.join(dir, "子.md"))).toBe(false); // 新文件没被创建
 
-      const manifest = readExporterManifest(dir)!;
-      expect(manifest.nodes["C"].path).toBe("父/子.md"); // manifest 未被错误更新
-    } finally {
-      setImmutable(oldAbs, false); // 恢复，避免污染 tmp 清理
+        const manifest = readExporterManifest(dir)!;
+        expect(manifest.nodes["C"].path).toBe("父/子.md"); // manifest 未被错误更新
+      } finally {
+        fs.chmodSync(parentDir, 0o755); // 恢复，避免污染 tmp 清理
+      }
+
+      // 恢复后下一轮应顺利补上移动+重导
+      const r3 = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+      expect(r3.error).toBeUndefined();
+      expect(r3.moved).toBe(1);
+      expect(r3.exported).toBe(1);
+      expect(fs.existsSync(oldAbs)).toBe(false);
+      expect(fs.existsSync(path.join(dir, "子.md"))).toBe(true);
     }
-
-    // 恢复后下一轮应顺利补上移动+重导
-    const r3 = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
-    expect(r3.error).toBeUndefined();
-    expect(r3.moved).toBe(1);
-    expect(r3.exported).toBe(1);
-    expect(fs.existsSync(oldAbs)).toBe(false);
-    expect(fs.existsSync(path.join(dir, "子.md"))).toBe(true);
-  });
+  );
 });
 
 describe("tryMoveNode（纯逻辑：Important#2 移动失败判定）", () => {
