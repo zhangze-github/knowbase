@@ -13,7 +13,7 @@ import {
 import * as git from "../git.js";
 import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
-import { readIndex, INDEX_MAX_BYTES } from "../agent-config.js";
+import { readKbTree, TREE_MAX_BYTES } from "../agent-config.js";
 import {
   planSkills,
   readExistingTargets,
@@ -180,28 +180,21 @@ export function cmdStatus(): number {
     }
   }
 
-  // agent 提示词索引（这个机制默认静默运行，必须给出可见性）
+  // agent 提示词目录树（这个机制默认静默运行，必须给出可见性）
   console.log("");
   if (cfg.agentConfig === false) {
     console.log("agent 提示词：已关闭（init 时用了 --no-agent-config）");
   } else {
-    const idx = readIndex(cfg.dir);
-    if (!idx.name) {
-      // 不计入 anomalies：knowbase 不生成也不播种 index.md，「根目录还没有索引」
+    const tree = readKbTree(cfg.dir);
+    if (tree.files === 0) {
+      // 不计入 anomalies：knowbase 不生成也不播种任何文件，「知识库还没有文件」
       // 是每个团队 day one 的正常状态，计入会让 status 永久非零退出、
       // 把拿退出码做监控的包装脚本永久标红。
-      console.log(
-        "agent 提示词：已启用；知识库根目录暂无 index.md，区块中改为提示 agent 直接 grep 全库"
-      );
-    } else if ((idx.text ?? "").trim() === "") {
-      // 与 buildBlock 的空索引判断保持同一口径：文件在但没内容，不报「已注入 0.0KB」
-      console.log(
-        `agent 提示词：已启用；${idx.name} 存在但为空，区块中改为提示 agent 直接 grep 全库`
-      );
+      console.log("agent 提示词：已启用；知识库暂无文件，区块中提示 agent 直接 grep 全库");
     } else {
-      const kb = (idx.bytes / 1024).toFixed(1);
-      const note = idx.truncated ? `，超 ${INDEX_MAX_BYTES / 1024}KB 已截断` : "";
-      console.log(`agent 提示词：已注入 ${idx.name}（${kb}KB${note}）`);
+      const kbSize = (tree.bytes / 1024).toFixed(1);
+      const note = tree.truncated ? `，超 ${TREE_MAX_BYTES / 1024}KB 已截断` : "";
+      console.log(`agent 提示词：已注入目录树（${tree.files} 个文件，${kbSize}KB${note}）`);
     }
   }
 

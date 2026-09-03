@@ -299,7 +299,7 @@ describe("refreshAgentPrompts", () => {
 
     // init 建好区块之后，刷新照常生效
     syncAgentConfig(kb, home);
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 新条目\n");
+    fs.writeFileSync(path.join(kb, "新条目.md"), "内容");
     refreshAgentPrompts(cfg(true), lg, home);
     expect(fs.readFileSync(claude(), "utf8")).toContain("新条目");
   });
@@ -326,7 +326,9 @@ describe("refreshAgentPrompts", () => {
     const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
       throw new Error("模拟 rename 失败");
     });
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 触发一次真实写入\n");
+    // 新增文件让目录树内容真正变化，从而触发一次真实写入
+    // （单纯改写已有文件内容不影响树，不会产生新的写盘）
+    fs.writeFileSync(path.join(kb, "触发一次真实写入.md"), "内容");
 
     expect(() => refreshAgentPrompts(cfg(true), lg, home)).not.toThrow();
     spy.mockRestore();

@@ -34,27 +34,8 @@ export function agentTargets(home: string = os.homedir()): AgentTarget[] {
   ];
 }
 
-/** 索引文件的规范名。查找时大小写不敏感。 */
-export const INDEX_NAME = "index.md";
-
-/** 内嵌索引的字节上限（约 2k token）。索引长起来会静默吃掉每次会话的上下文预算。 */
-export const INDEX_MAX_BYTES = 8192;
-
-/**
- * 从目录条目名中挑出索引文件名，大小写不敏感。
- *
- * APFS 默认大小写不敏感、Linux 敏感：按字面 index.md 查找会导致仓库里存在
- * Index.md 时「macOS 上索引生效、Linux 上索引缺失」的跨平台不一致。
- *
- * 写成接受条目名数组的纯函数，是因为「多个大小写变体并存」在大小写不敏感的
- * 文件系统上无法落盘构造，只能这样测。
- */
-export function pickIndexName(entries: string[]): string | null {
-  const matches = entries.filter((e) => e.toLowerCase() === INDEX_NAME);
-  if (matches.length === 0) return null;
-  if (matches.includes(INDEX_NAME)) return INDEX_NAME;
-  return [...matches].sort()[0];
-}
+/** 注入目录树的字节上限（约 2k token）。树长起来会静默吃掉每次会话的上下文预算。 */
+export const TREE_MAX_BYTES = 8192;
 
 /**
  * 中和索引正文中的区块标记字样。
@@ -79,74 +60,90 @@ function truncateAtLine(text: string, max: number): { text: string; truncated: b
   return { text: kept, truncated: true };
 }
 
-export interface IndexResult {
-  /** 实际命中的文件名（如 index.md / Index.md）；未找到为 null。 */
-  name: string | null;
-  /** 规范化后可直接内嵌的正文；未找到为 null。 */
+export interface KbTree {
+  /** 可直接内嵌的树文本；知识库无文件时为 null。 */
   text: string | null;
-  /** 索引文件原始字节数（供 status 展示）。 */
+  /** 文件总数（不含被跳过的条目）。 */
+  files: number;
+  /** 完整树文本的原始字节数（截断前，供 status 展示）。 */
   bytes: number;
-  /** 是否因超过 INDEX_MAX_BYTES 被截断。 */
   truncated: boolean;
 }
 
-// 冻结：这是被多条路径按引用返回的共享单例，任何调用方顺手改一个字段都会污染
-// 后续所有调用。冻结把这种静默污染变成立即的 TypeError。
-const EMPTY_INDEX: IndexResult = Object.freeze({
-  name: null,
-  text: null,
-  bytes: 0,
-  truncated: false,
-});
-
 /**
- * 读取知识库根索引并规范化为可内嵌的正文。
- * 目录不存在 / 无索引 / 读取失败一律返回空结果，绝不抛错——
- * 索引维护 agent 尚未跑起来时 init 不该失败。
+ * 递归列出一层目录下的行：目录先于文件、各自按默认字符串排序，保证
+ * 跨平台（不同文件系统的 readdir 顺序不保证一致）确定性输出。
+ * 跳过点开头的条目（.git、.knowbase-mirror.json、.gitignore、
+ * .knowbase-pause 等 knowbase/git 自身的管理文件）与 node_modules——
+ * 这些对 agent 定位知识没有意义，混进树里只会稀释信噪比。
+ * 任意一层 readdir 失败（目录不存在、权限问题等）当作空，不向上抛。
  */
-export function readIndex(dir: string): IndexResult {
-  let entries: string[];
+function listTree(dir: string, indent: string, acc: string[], counter: { files: number }): void {
+  let entries: fs.Dirent[];
   try {
-    entries = fs.readdirSync(dir);
+    entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return EMPTY_INDEX;
+    return;
   }
-  const name = pickIndexName(entries);
-  if (!name) return EMPTY_INDEX;
-
-  let raw: string;
-  try {
-    raw = fs.readFileSync(path.join(dir, name), "utf8");
-  } catch {
-    return EMPTY_INDEX;
+  const visible = entries.filter((e) => !e.name.startsWith(".") && e.name !== "node_modules");
+  const dirs = visible.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  const files = visible.filter((e) => !e.isDirectory()).map((e) => e.name).sort();
+  for (const name of dirs) {
+    acc.push(`${indent}${name}/`);
+    listTree(path.join(dir, name), indent + "  ", acc, counter);
   }
-
-  const bytes = Buffer.byteLength(raw, "utf8");
-  const cut = truncateAtLine(neutralizeMarkers(raw), INDEX_MAX_BYTES);
-  const text = cut.truncated
-    ? `${cut.text}\n\n…（索引过长已截断，完整内容见 \`${path.join(dir, name)}\`）`
-    : cut.text;
-  return { name, text, bytes, truncated: cut.truncated };
+  for (const name of files) {
+    acc.push(`${indent}${name}`);
+    counter.files++;
+  }
 }
 
 /**
- * 生成托管区块正文（含起止标记），内嵌本机知识库目录与根索引快照。
- * index 传 null / undefined 时输出回退文案（索引维护 agent 还没跑起来的情况）。
+ * 生成知识库目录树，替代旧的「根 index.md 快照」注入。
+ *
+ * 为什么用自动生成的树取代 index.md：index.md 要人（或专门的索引维护 agent）
+ * 持续手改才不过期，团队实践下来经常是「建了一次、之后再没更新过」；目录树
+ * 由 knowbase 每个同步周期直接扫描文件系统生成，零维护、永不过期。镜像模式下
+ * 文件名本身就是飞书文档标题（见 spec §9），是天然的语义索引，树上一眼就能
+ * 看出「哪篇文档在哪」，agent 不需要再多一层人工索引就能按路径定位文件。
+ *
+ * 目录不存在 / 读取失败一律返回空结果，绝不抛错——daemon 路径不能因为
+ * 知识库目录一时不可读就崩掉。
+ */
+export function readKbTree(dir: string): KbTree {
+  const lines: string[] = [];
+  const counter = { files: 0 };
+  listTree(dir, "", lines, counter);
+  if (lines.length === 0) {
+    return { text: null, files: 0, bytes: 0, truncated: false };
+  }
+  const raw = lines.join("\n");
+  const bytes = Buffer.byteLength(raw, "utf8");
+  const cut = truncateAtLine(neutralizeMarkers(raw), TREE_MAX_BYTES);
+  const text = cut.truncated
+    ? `${cut.text}\n\n…（目录树过长已截断，其余文件直接 grep 全库定位）`
+    : cut.text;
+  return { text, files: counter.files, bytes, truncated: cut.truncated };
+}
+
+/**
+ * 生成托管区块正文（含起止标记），内嵌本机知识库目录与自动生成的目录树。
+ * tree 传 null / undefined（或纯空白）时输出回退文案（知识库暂无文件的情况）。
  * mirror 传 null / undefined 时输出经典文案；非 null 时切换为镜像模式文案（spec §5）。
  */
 export function buildBlock(
   dir: string,
-  index?: string | null,
+  tree?: string | null,
   mirror?: MirrorBlockInfo | null
 ): string {
-  // 纯空白的索引（含零字节文件）也走回退文案：否则会输出一个有标题没正文的
-  // 段落，且与 status 「存在但为空」的口径打架。
-  const hasIndex = index != null && index.trim() !== "";
-  const indexSection = hasIndex
-    ? `### 知识库索引（根 ${INDEX_NAME} 快照，由 knowbase 自动同步）
+  // 纯空白的树（知识库确实没有文件）也走回退文案：否则会输出一个有标题没正文的
+  // 段落，且与 status 「暂无文件」的口径打架。
+  const hasTree = tree != null && tree.trim() !== "";
+  const treeSection = hasTree
+    ? `### 知识库目录树（全部文件，由 knowbase 自动生成）
 
-${index}`
-    : `根目录暂无 \`${INDEX_NAME}\`，需要时直接 grep 全库。`;
+${tree}`
+    : `知识库暂无文件，需要时直接 grep 全库。`;
 
   if (mirror) {
     const inbox = mirror.inboxUrl
@@ -168,9 +165,9 @@ ${index}`
 
 **团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
 
-**导航**：每个目录下的 \`${INDEX_NAME}\` 是该目录索引（文件名大小写不敏感）。进子目录前先读它。
+**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题）；先在树中定位文件路径再读取，树被截断或找不到时 grep 全库。
 
-${indexSection}
+${treeSection}
 ${BLOCK_END}`;
   }
 
@@ -189,9 +186,9 @@ ${BLOCK_END}`;
 
 **操作**：直接读写 Markdown，保存即同步，无需 git add/commit/push。大范围改动前 \`knowbase pause\`，完成后 \`knowbase resume\`。
 
-**导航**：每个目录下的 \`${INDEX_NAME}\` 是该目录索引（文件名大小写不敏感）。进子目录前先读它；增删文件后顺手更新它。
+**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题）；先在树中定位文件路径再读取，树被截断或找不到时 grep 全库。
 
-${indexSection}
+${treeSection}
 ${BLOCK_END}`;
 }
 
@@ -311,7 +308,7 @@ function writeFileAtomic(file: string, content: string): void {
 }
 
 /**
- * 把托管区块（含知识库根索引快照）写入所有 agent 全局提示词文件。
+ * 把托管区块（含知识库目录树快照）写入所有 agent 全局提示词文件。
  * init 与守护进程每个同步周期共用此函数；内容与现状相同则不落盘。
  */
 export function syncAgentConfig(
@@ -324,7 +321,7 @@ export function syncAgentConfig(
   const mirror = isMirrorMode(dir)
     ? { inboxUrl: readMirrorManifest(dir)?.agent_inbox_url }
     : null;
-  const block = buildBlock(dir, readIndex(dir).text, mirror);
+  const block = buildBlock(dir, readKbTree(dir).text, mirror);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);

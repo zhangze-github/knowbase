@@ -318,22 +318,24 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(st.code).not.toBe(0);
   });
 
-  it("status 报告索引注入状态：缺失 / 已注入 / 已关闭", () => {
+  it("status 报告目录树注入状态：暂无 / 已注入 / 已关闭", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    // 仓库无 index.md → 给出提示，但这是 day one 的正常状态，不算异常
+    // 清空 clone 下来的种子文件（README.md 等），验证「知识库暂无文件」这个
+    // day one 的正常状态，不算异常
+    fs.rmSync(path.join(kb, "README.md"), { force: true });
     const missing = knowbase(["status"]);
     expect(missing.out).toContain("agent 提示词");
-    expect(missing.out).toContain("暂无 index.md");
-    // 「需要注意」汇总里不得出现索引缺失（否则每个新团队的 status 永久非零退出）
+    expect(missing.out).toContain("知识库暂无文件");
+    // 「需要注意」汇总里不得出现文件缺失（否则每个新团队的 status 永久非零退出）
     const attention = missing.out.split("需要注意：")[1] ?? "";
-    expect(attention).not.toContain("index.md");
+    expect(attention).not.toContain("知识库暂无文件");
 
-    // 有 index.md → 报告文件名与体积
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/\n");
+    // 有文件 → 报告文件数与体积
+    fs.writeFileSync(path.join(kb, "笔记.md"), "# 笔记\n- 角色/\n");
     const injected = knowbase(["status"]);
-    expect(injected.out).toMatch(/agent 提示词：已注入 index\.md（[\d.]+KB）/);
+    expect(injected.out).toMatch(/agent 提示词：已注入目录树（1 个文件，[\d.]+KB）/);
 
     // 关闭开关 → 报告已关闭
     expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
@@ -494,48 +496,49 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     }
   });
 
-  it("零字节 index.md → 区块回退文案与 status 口径一致", () => {
+  it("空知识库 → 区块回退文案与 status 口径一致", () => {
     const kb = path.join(root, "kb");
     const claude = path.join(home, ".claude", "CLAUDE.md");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    fs.writeFileSync(path.join(kb, "index.md"), "");
+    // 清空 clone 下来的种子文件，模拟「知识库确实没有文件」
+    fs.rmSync(path.join(kb, "README.md"), { force: true });
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    // 区块：走回退文案，不出现空的索引小节
+    // 区块：走回退文案，不出现空的目录树小节
     const content = fs.readFileSync(claude, "utf8");
-    expect(content).not.toContain("### 知识库索引");
+    expect(content).not.toContain("### 知识库目录树");
     expect(content).toContain("暂无");
-    // status：报告「存在但为空」，不报「已注入 0.0KB」
+    // status：报告「知识库暂无文件」，不报「已注入 0.0KB」
     const st = knowbase(["status"]);
-    expect(st.out).toContain("index.md 存在但为空");
-    expect(st.out).not.toContain("已注入 index.md（0.0KB）");
+    expect(st.out).toContain("知识库暂无文件");
+    expect(st.out).not.toContain("已注入目录树");
   });
 
-  it("索引含 KNOWBASE:END 字样时 init→uninstall 全链路不吞用户内容", () => {
-    const kb = path.join(root, "kb");
-    const claude = path.join(home, ".claude", "CLAUDE.md");
-    fs.mkdirSync(path.dirname(claude), { recursive: true });
-    fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
+  it.skipIf(process.platform === "win32")(
+    "文件名含 KNOWBASE:END 字样时 init→uninstall 全链路不吞用户内容",
+    () => {
+      const kb = path.join(root, "kb");
+      const claude = path.join(home, ".claude", "CLAUDE.md");
+      fs.mkdirSync(path.dirname(claude), { recursive: true });
+      fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
 
-    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
-    // 索引正文里出现区块结束标记字样（例如索引记录了 knowbase 自身的文档）
-    fs.writeFileSync(
-      path.join(kb, "index.md"),
-      "# 索引\n- knowbase/：区块以 KNOWBASE:END 收尾\n"
-    );
-    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+      expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+      // 目录树里出现区块结束标记字样的文件名（例如某篇文档标题恰好如此）
+      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "内容");
+      expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    const withBlock = fs.readFileSync(claude, "utf8");
-    expect(withBlock).toContain("KNOWBASE_END"); // 已中和
-    expect(withBlock.split("KNOWBASE:END").length - 1).toBe(1); // 真结束标记只有一个
+      const withBlock = fs.readFileSync(claude, "utf8");
+      expect(withBlock).toContain("KNOWBASE_END"); // 已中和
+      expect(withBlock.split("KNOWBASE:END").length - 1).toBe(1); // 真结束标记只有一个
 
-    expect(knowbase(["uninstall"]).code).toBe(0);
-    const after = fs.readFileSync(claude, "utf8");
-    expect(after).toContain("始终用中文回答");
-    expect(after).not.toContain("KNOWBASE");
-    expect(after).not.toContain("knowbase/：");
-  });
+      expect(knowbase(["uninstall"]).code).toBe(0);
+      const after = fs.readFileSync(claude, "utf8");
+      expect(after).toContain("始终用中文回答");
+      expect(after).not.toContain("KNOWBASE");
+      expect(after).not.toContain("KNOWBASE:END.md");
+    }
+  );
 
   it("uninstall 保留本地文件夹并移除全局提示词区块", () => {
     const kb = path.join(root, "kb");

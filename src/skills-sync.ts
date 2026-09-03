@@ -213,8 +213,8 @@ export function summarizeByTool(
 /**
  * 仅大小写不同的目标名去重：取排序第一个，其余作为 dropped 返回。
  *
- * 抽成接受数组的纯函数，理由与 agent-config.ts 的 pickIndexName 相同：
- * 「仅大小写不同的两个目录并存」在大小写不敏感的文件系统（macOS 默认 APFS）
+ * 抽成接受数组的纯函数，理由是「仅大小写不同的两个目录并存」在大小写不敏感
+ * 的文件系统（macOS 默认 APFS）
  * 上无法落盘构造，只能这样测。
  *
  * 取值必须定死：macOS 不敏感、Linux 敏感，不定死会产生「同一知识库在不同

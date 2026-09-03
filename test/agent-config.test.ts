@@ -10,9 +10,8 @@ import {
   syncAgentConfig,
   uninstallAgentConfig,
   agentTargets,
-  pickIndexName,
-  readIndex,
-  INDEX_MAX_BYTES,
+  readKbTree,
+  TREE_MAX_BYTES,
   MirrorBlockInfo,
 } from "../src/agent-config.js";
 import { tmpDir } from "./helpers.js";
@@ -110,7 +109,7 @@ describe("syncAgentConfig / uninstallAgentConfig", () => {
   });
 });
 
-describe("索引读取", () => {
+describe("目录树读取", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
@@ -119,82 +118,74 @@ describe("索引读取", () => {
     fs.rmSync(kb, { recursive: true, force: true });
   });
 
-  it("pickIndexName 大小写不敏感", () => {
-    expect(pickIndexName(["README.md", "Index.md"])).toBe("Index.md");
-    expect(pickIndexName(["INDEX.MD"])).toBe("INDEX.MD");
-    expect(pickIndexName(["readme.md", "角色"])).toBe(null);
-    expect(pickIndexName([])).toBe(null);
+  it("嵌套结构：目录先于文件、各自排序、目录带 / 后缀、缩进两格", () => {
+    fs.mkdirSync(path.join(kb, "b-dir", "sub"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "a.md"), "a");
+    fs.writeFileSync(path.join(kb, "z.txt"), "z");
+    fs.writeFileSync(path.join(kb, "b-dir", "x.md"), "x");
+    fs.writeFileSync(path.join(kb, "b-dir", "sub", "y.md"), "y");
+
+    const r = readKbTree(kb);
+    expect(r.text).toBe(
+      ["b-dir/", "  sub/", "    y.md", "  x.md", "a.md", "z.txt"].join("\n")
+    );
+    expect(r.files).toBe(4);
+    expect(r.truncated).toBe(false);
   });
 
-  it("pickIndexName 并存变体时取值确定：优先精确小写", () => {
-    // 并存状态只可能出现在大小写敏感的文件系统上，无法在 macOS 落盘构造，
-    // 因此选取逻辑写成纯函数，直接喂条目名数组来测。
-    expect(pickIndexName(["Index.md", "index.md", "INDEX.md"])).toBe("index.md");
-    // 无精确匹配 → 排序首个（'N' < 'n'，故 INDEX.md 在前）
-    expect(pickIndexName(["Index.md", "INDEX.md"])).toBe("INDEX.md");
+  it("跳过点开头的条目与 node_modules", () => {
+    fs.writeFileSync(path.join(kb, ".gitignore"), "x");
+    fs.writeFileSync(path.join(kb, ".knowbase-mirror.json"), "{}");
+    fs.mkdirSync(path.join(kb, "node_modules", "pkg"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "node_modules", "pkg", "a.js"), "x");
+    fs.writeFileSync(path.join(kb, "README.md"), "x");
+
+    const r = readKbTree(kb);
+    expect(r.text).toBe("README.md");
+    expect(r.files).toBe(1);
   });
 
-  it("索引缺失 → 全部为空且不抛错", () => {
-    const r = readIndex(kb);
-    expect(r.name).toBe(null);
+  it("空目录 → text 为 null", () => {
+    const r = readKbTree(kb);
     expect(r.text).toBe(null);
+    expect(r.files).toBe(0);
     expect(r.bytes).toBe(0);
     expect(r.truncated).toBe(false);
   });
 
-  it("目录不存在 → 不抛错", () => {
-    const r = readIndex(path.join(kb, "nope"));
-    expect(r.name).toBe(null);
+  it("目录不存在 → 不抛错，text 为 null", () => {
+    const r = readKbTree(path.join(kb, "nope"));
+    expect(r.text).toBe(null);
+    expect(r.files).toBe(0);
   });
 
-  it("读取 Index.md 并中和标记字样", () => {
-    fs.writeFileSync(
-      path.join(kb, "Index.md"),
-      "# 索引\n- knowbase 的区块以 KNOWBASE:END 结尾\n"
-    );
-    const r = readIndex(kb);
-    expect(r.name).toBe("Index.md");
-    expect(r.text).toContain("# 索引");
-    expect(r.text).not.toContain("KNOWBASE:END");
-    expect(r.text).toContain("KNOWBASE_END");
-    expect(r.truncated).toBe(false);
-  });
+  it.skipIf(process.platform === "win32")(
+    "文件名含 KNOWBASE:END 字样被中和",
+    () => {
+      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "x");
+      const r = readKbTree(kb);
+      expect(r.text).not.toContain("KNOWBASE:END");
+      expect(r.text).toContain("KNOWBASE_END.md");
+    }
+  );
 
-  it("超 8KB → 行边界截断并附提示", () => {
-    const line = "x".repeat(99) + "\n"; // 100 字节/行
-    fs.writeFileSync(path.join(kb, "index.md"), line.repeat(100)); // 10000 字节
-    const r = readIndex(kb);
-    expect(r.bytes).toBe(10000);
+  it("大量文件超 8KB → truncated，含截断提示，正文行完整且 ≤ TREE_MAX_BYTES", () => {
+    // 每个文件名占一行；造出远超 8KB 的树
+    for (let i = 0; i < 2000; i++) {
+      fs.writeFileSync(path.join(kb, `file-${String(i).padStart(5, "0")}.md`), "x");
+    }
+    const r = readKbTree(kb);
     expect(r.truncated).toBe(true);
     expect(r.text!).toContain("已截断");
-    // 正文部分（提示前）必须整行完整，且不超上限
     const body = r.text!.split("\n\n…")[0];
-    expect(body.split("\n").every((l) => l === "x".repeat(99))).toBe(true);
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
-  });
-
-  it("单行超长且全文无换行 → 退化为按字节截断，不产生替换符", () => {
-    fs.writeFileSync(path.join(kb, "index.md"), "x".repeat(10000)); // 无换行，10000 字节
-    const r = readIndex(kb);
-    expect(r.truncated).toBe(true);
-    const body = r.text!.split("\n\n…")[0];
-    expect(body).not.toContain("�");
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
-  });
-
-  it("截断点落在多字节字符中间 → 不产生替换符", () => {
-    // 每个「汉」3 字节，4000 个 = 12000 字节，且全文无换行；
-    // 8192 不是 3 的倍数，截断点必然落在某个字符中间。
-    fs.writeFileSync(path.join(kb, "index.md"), "汉".repeat(4000));
-    const r = readIndex(kb);
-    expect(r.truncated).toBe(true);
-    const body = r.text!.split("\n\n…")[0];
-    expect(body).not.toContain("�");
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(INDEX_MAX_BYTES);
+    // 正文每一行都应是完整的文件名（没有被从中间切断）
+    expect(body.split("\n").every((l) => /^file-\d{5}\.md$/.test(l))).toBe(true);
+    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(TREE_MAX_BYTES);
+    expect(r.bytes).toBeGreaterThan(TREE_MAX_BYTES);
   });
 });
 
-describe("区块内嵌索引", () => {
+describe("区块内嵌目录树", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
@@ -205,16 +196,16 @@ describe("区块内嵌索引", () => {
 
   const claudeFile = () => path.join(home, ".claude", "CLAUDE.md");
 
-  it("有索引 → 含索引标题、正文与导航段", () => {
-    const b = buildBlock("/kb", "# 索引\n- 角色/：角色定义与职责");
-    expect(b).toContain("### 知识库索引");
-    expect(b).toContain("角色定义与职责");
+  it("有树 → 含目录树标题、文件名与导航段", () => {
+    const b = buildBlock("/kb", "角色/\n  角色定义与职责.md");
+    expect(b).toContain("### 知识库目录树");
+    expect(b).toContain("角色定义与职责.md");
     expect(b).toContain("**导航**");
   });
 
-  it("无索引 → 回退文案、无索引标题、仍有导航段", () => {
+  it("空库→回退（暂无）：无树标题、仍有导航段", () => {
     const b = buildBlock("/kb", null);
-    expect(b).not.toContain("### 知识库索引");
+    expect(b).not.toContain("### 知识库目录树");
     expect(b).toContain("暂无");
     expect(b).toContain("**导航**");
   });
@@ -227,20 +218,27 @@ describe("区块内嵌索引", () => {
     expect(b).toContain("org-");
   });
 
-  it("索引含标记字样时 sync→strip 往返不吞用户内容", () => {
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n区块以 KNOWBASE:END 收尾\n");
-    fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
-    fs.writeFileSync(claudeFile(), "# 偏好\n用中文回答\n");
+  it.skipIf(process.platform === "win32")(
+    "文件名含标记字样时 sync→strip 往返不吞用户内容",
+    () => {
+      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "x");
+      fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
+      fs.writeFileSync(claudeFile(), "# 偏好\n用中文回答\n");
 
-    syncAgentConfig(kb, home);
-    const { content, removed } = stripBlock(fs.readFileSync(claudeFile(), "utf8"));
-    expect(removed).toBe(true);
-    expect(content).toContain("用中文回答");
-    expect(content).not.toContain("KNOWBASE");
-  });
+      syncAgentConfig(kb, home);
+      const written = fs.readFileSync(claudeFile(), "utf8");
+      // 真正的区块结束标记只应出现一次：文件名里的标记字样已被中和
+      expect(written.split("KNOWBASE:END").length - 1).toBe(1);
+
+      const { content, removed } = stripBlock(written);
+      expect(removed).toBe(true);
+      expect(content).toContain("用中文回答");
+      expect(content).not.toContain("KNOWBASE");
+    }
+  );
 
   it("内容未变 → unchanged 且不落盘", async () => {
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 条目\n");
+    fs.writeFileSync(path.join(kb, "角色定义.md"), "内容");
     syncAgentConfig(kb, home);
     const before = fs.statSync(claudeFile()).mtimeMs;
     await new Promise((r) => setTimeout(r, 20));
@@ -250,12 +248,12 @@ describe("区块内嵌索引", () => {
     expect(fs.statSync(claudeFile()).mtimeMs).toBe(before);
   });
 
-  it("索引变化 → 区块随之更新，旧内容消失", () => {
-    const idx = path.join(kb, "index.md");
-    fs.writeFileSync(idx, "# 索引\n- 旧条目\n");
+  it("新增文件 → 区块随之更新，旧内容消失", () => {
+    fs.writeFileSync(path.join(kb, "旧条目.md"), "旧");
     syncAgentConfig(kb, home);
 
-    fs.writeFileSync(idx, "# 索引\n- 新条目\n");
+    fs.rmSync(path.join(kb, "旧条目.md"));
+    fs.writeFileSync(path.join(kb, "新条目.md"), "新");
     const changes = syncAgentConfig(kb, home);
     expect(changes.every((c) => c.action === "updated")).toBe(true);
 
@@ -265,27 +263,26 @@ describe("区块内嵌索引", () => {
   });
 
   it("写入后不残留临时文件", () => {
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n");
+    fs.writeFileSync(path.join(kb, "README.md"), "内容");
     syncAgentConfig(kb, home);
     const left = fs.readdirSync(path.join(home, ".claude"));
     expect(left.some((f) => f.includes("knowbase-tmp"))).toBe(false);
     expect(left).toContain("CLAUDE.md");
   });
 
-  it("零字节 index.md → 区块走回退文案（与 status 口径一致）", () => {
-    fs.writeFileSync(path.join(kb, "index.md"), "");
+  it("空知识库 → 区块走回退文案（与 status 口径一致）", () => {
     syncAgentConfig(kb, home);
     const content = fs.readFileSync(claudeFile(), "utf8");
-    expect(content).not.toContain("### 知识库索引");
+    expect(content).not.toContain("### 知识库目录树");
     expect(content).toContain("暂无");
   });
 });
 
-describe("buildBlock 空索引口径", () => {
-  it("空串 / 纯空白索引 → 与 null 同样走回退文案", () => {
+describe("buildBlock 空树口径", () => {
+  it("空串 / 纯空白树 → 与 null 同样走回退文案", () => {
     for (const empty of ["", "   \n\t\n"]) {
       const b = buildBlock("/kb", empty);
-      expect(b).not.toContain("### 知识库索引");
+      expect(b).not.toContain("### 知识库目录树");
       expect(b).toContain("暂无");
     }
   });
@@ -302,7 +299,7 @@ describe("原子写安全性（并发 / 软链）", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：角色定义\n");
+    fs.writeFileSync(path.join(kb, "角色定义.md"), "角色定义与职责");
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -426,22 +423,10 @@ describe("原子写安全性（并发 / 软链）", () => {
 
     // init 建过区块之后 → onlyExisting 正常刷新
     syncAgentConfig(kb, home);
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 新条目\n");
+    fs.writeFileSync(path.join(kb, "新条目.md"), "新条目内容");
     const refreshed = syncAgentConfig(kb, home, { onlyExisting: true });
     expect(refreshed.find((c) => c.name === "Claude Code")!.action).toBe("updated");
     expect(fs.readFileSync(claudeFile(), "utf8")).toContain("新条目");
-  });
-});
-
-describe("空索引结果不可变", () => {
-  it("readIndex 的空结果被冻结，误改立即报错", () => {
-    const kb = tmpDir("kb-frozen");
-    const r = readIndex(kb);
-    expect(r.name).toBe(null);
-    expect(() => {
-      (r as { bytes: number }).bytes = 99;
-    }).toThrow(TypeError);
-    fs.rmSync(kb, { recursive: true, force: true });
   });
 });
 

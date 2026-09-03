@@ -364,7 +364,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 /**
- * 每个同步周期末刷新 agent 提示词中的知识库索引快照。
+ * 每个同步周期末刷新 agent 提示词中的知识库目录树快照。
  *
  * 纯本地读 + 写提示词文件，不碰 git，因此不受 .knowbase-pause 影响。
  * 任何异常只记日志：不能影响 SyncResult / DaemonState，也不能让守护进程退出。
@@ -392,7 +392,7 @@ export function refreshAgentPrompts(
     );
     if (touched.length > 0) {
       logger.log(
-        `agent 提示词索引已刷新：${touched.map((c) => c.name).join(", ")}`
+        `agent 提示词目录树已刷新：${touched.map((c) => c.name).join(", ")}`
       );
     }
   } catch (e) {

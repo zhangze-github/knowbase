@@ -122,7 +122,7 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     expect(head2).toBe(head1);
   }, 40000);
 
-  it("索引变更后守护进程自动刷新 CLAUDE.md 中的区块", async () => {
+  it("新增文件后守护进程自动刷新 CLAUDE.md 中的区块", async () => {
     const kb = path.join(root, "kb");
     const init = spawnSync(
       "node",
@@ -131,9 +131,11 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     );
     expect(init.status).toBe(0);
 
-    // init 时仓库还没有 index.md → 区块应是回退文案
+    // init clone 下来的知识库已带 README.md（makeOrigin 种入）→ 区块应已含目录树
     const claude = path.join(home, ".claude", "CLAUDE.md");
-    expect(fs.readFileSync(claude, "utf8")).toContain("暂无");
+    const initial = fs.readFileSync(claude, "utf8");
+    expect(initial).toContain("### 知识库目录树");
+    expect(initial).toContain("README.md");
 
     daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
 
@@ -147,15 +149,15 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     }, 10000);
     expect(started).toBe(true);
 
-    // 写入索引 → 监听触发同步周期 → 周期末刷新区块
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：角色定义\n");
+    // 新增文件 → 监听触发同步周期 → 周期末刷新区块，目录树随之更新
+    fs.writeFileSync(path.join(kb, "角色定义.md"), "角色定义与职责");
 
     const refreshed = await waitFor(
-      () => fs.readFileSync(claude, "utf8").includes("角色定义"),
+      () => fs.readFileSync(claude, "utf8").includes("角色定义.md"),
       15000
     );
     expect(refreshed).toBe(true);
-    expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库索引");
+    expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库目录树");
   }, 40000);
 
   it("新增团队 skill 后守护进程自动分发到 ~/.claude/skills", async () => {
@@ -194,7 +196,7 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     expect(fs.readFileSync(skillMd, "utf8")).toContain("name: org-demo");
   }, 40000);
 
-  it("暂停期间仍刷新提示词索引（刷新不碰 git，与 pause 语义无关）", async () => {
+  it("暂停期间仍刷新提示词目录树（刷新不碰 git，与 pause 语义无关）", async () => {
     const kb = path.join(root, "kb");
     const init = spawnSync(
       "node",
@@ -207,8 +209,9 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     expect(spawnSync("node", [CLI, "pause"], { env: envFor() }).status).toBe(0);
     expect(fs.existsSync(path.join(kb, ".knowbase-pause"))).toBe(true);
 
+    // init clone 下来的知识库已带 README.md（makeOrigin 种入）→ 区块应已含目录树
     const claude = path.join(home, ".claude", "CLAUDE.md");
-    expect(fs.readFileSync(claude, "utf8")).toContain("暂无");
+    expect(fs.readFileSync(claude, "utf8")).toContain("README.md");
 
     daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
     const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
@@ -221,14 +224,14 @@ describe("守护进程：watch+防抖上行（轮询间隔 1 小时，只有监�
     }, 10000);
     expect(started).toBe(true);
 
-    fs.writeFileSync(path.join(kb, "index.md"), "# 索引\n- 角色/：暂停期间的索引\n");
+    fs.writeFileSync(path.join(kb, "paused-new-file.md"), "内容");
     const refreshed = await waitFor(
-      () => fs.readFileSync(claude, "utf8").includes("暂停期间的索引"),
+      () => fs.readFileSync(claude, "utf8").includes("paused-new-file.md"),
       15000
     );
     expect(refreshed).toBe(true);
-    // git 侧确实没动：索引仍是未提交状态
-    expect(g(kb, "status", "--porcelain").stdout).toContain("index.md");
+    // git 侧确实没动：新文件仍是未提交状态
+    expect(g(kb, "status", "--porcelain").stdout).toContain("paused-new-file.md");
   }, 40000);
 });
 
