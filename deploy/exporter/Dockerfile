@@ -1,9 +1,10 @@
 FROM node:22-slim
 
-# Install system dependencies: git and ca-certificates
+# Install system dependencies: git, ssh client (slim 镜像不带 ssh，SSH 远端 clone/push 必需) and ca-certificates
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
       git \
+      openssh-client \
       ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
