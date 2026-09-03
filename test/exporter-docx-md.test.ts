@@ -82,3 +82,84 @@ describe("基础块渲染", () => {
     expect(md.split("\n").some((l) => l.length > 0 && l.trim() === "")).toBe(false);
   });
 });
+
+describe("复杂块与降级", () => {
+  it("2x2 表格：表头 + 分隔行 + 数据行；单元格内 | 转义、换行压成空格", () => {
+    const md = renderDocxToMarkdown(doc(
+      {
+        block_id: "tb",
+        block_type: 31,
+        table: {
+          property: { row_size: 2, column_size: 2 },
+          cells: ["c1", "c2", "c3", "c4"],
+        },
+      },
+      { block_id: "c1", block_type: 32, children: ["c1t"] },
+      { block_id: "c1t", block_type: 2, text: { elements: [run("表头一")] } },
+      { block_id: "c2", block_type: 32, children: ["c2t"] },
+      { block_id: "c2t", block_type: 2, text: { elements: [run("表头二")] } },
+      { block_id: "c3", block_type: 32, children: ["c3t"] },
+      { block_id: "c3t", block_type: 2, text: { elements: [run("a|b")] } },
+      { block_id: "c4", block_type: 32, children: ["c4a", "c4b"] },
+      { block_id: "c4a", block_type: 2, text: { elements: [run("行一")] } },
+      { block_id: "c4b", block_type: 2, text: { elements: [run("行二")] } },
+    ) as DocxBlock[], CTX);
+    const lines = md.split("\n");
+    expect(lines[0]).toBe("| 表头一 | 表头二 |");
+    expect(lines[1]).toBe("| --- | --- |");
+    expect(lines[2]).toContain("a\\|b");
+    expect(lines[2]).toContain("行一 行二");
+  });
+
+  it("callout：children 两个 text 块每行都有 > 前缀", () => {
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "co", block_type: 19, children: ["t1", "t2"] },
+      { block_id: "t1", block_type: 2, text: { elements: [run("行一")] } },
+      { block_id: "t2", block_type: 2, text: { elements: [run("行二")] } },
+    ) as DocxBlock[], CTX);
+    expect(md).toContain("> 行一");
+    expect(md).toContain("> 行二");
+  });
+
+  it("image → 占位含 selfUrl", () => {
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "img", block_type: 27, image: {} },
+    ) as DocxBlock[], CTX);
+    expect(md).toContain("🖼 图片见原文");
+    expect(md).toContain(`[${CTX.selfUrl}](${CTX.selfUrl})`);
+  });
+
+  it("bitable 与未知类型 999 → 无法转换占位", () => {
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "bt", block_type: 18 },
+      { block_id: "unk", block_type: 999 },
+    ) as DocxBlock[], CTX);
+    expect(md).toContain("⚠ 此处为无法转换的内容（type 18）");
+    expect(md).toContain("⚠ 此处为无法转换的内容（type 999）");
+    expect(md).toContain(`[原文](${CTX.selfUrl})`);
+  });
+
+  it("mention_doc 命中 pathForToken → 相对路径双链", () => {
+    const ctx = {
+      selfUrl: "https://acme.feishu.cn/wiki/N1",
+      selfPath: "a/b.md",
+      pathForToken: (_t: string) => "c/d.md",
+      urlForToken: (_t: string) => "https://x/wiki/T",
+    };
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "t", block_type: 2, text: { elements: [
+        { mention_doc: { token: "tok1", title: "标题" } },
+      ] } },
+    ) as DocxBlock[], ctx);
+    expect(md).toContain("[标题](../c/d.md)（[飞书](https://x/wiki/T)）");
+  });
+
+  it("mention_doc 未命中 → 直接用 mention_doc.url", () => {
+    const md = renderDocxToMarkdown(doc(
+      { block_id: "t", block_type: 2, text: { elements: [
+        { mention_doc: { token: "tok2", title: "标题", url: "https://acme.feishu.cn/wiki/T2" } },
+      ] } },
+    ) as DocxBlock[], CTX);
+    expect(md).toContain("[标题](https://acme.feishu.cn/wiki/T2)");
+  });
+});

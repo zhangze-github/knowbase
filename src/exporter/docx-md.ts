@@ -1,19 +1,22 @@
+import path from "node:path";
 import type { DocxBlock } from "./lark-client.js";
 
 /**
- * 渲染上下文（spec §3.3-3/5）。pathForToken/urlForToken 供 Task 5 的库内链接
- * 双链改写使用；本任务（基础块）不消费，仅先落好接口形状。
+ * 渲染上下文（spec §3.3-3/5/6）。pathForToken/urlForToken/selfPath 用于
+ * mention_doc 的库内链接双链改写（spec §3.3-5）。
  */
 export interface RenderCtx {
   /** 本文档飞书 URL（降级占位用）。 */
   selfUrl: string;
-  /** 库内链接改写（Task 5 用）：token → 仓库相对路径。 */
+  /** 本文档在仓库内的相对路径（用于把 pathForToken 命中的目标路径转成相对链接；缺省时直接用目标路径）。 */
+  selfPath?: string;
+  /** 库内链接改写：token → 仓库相对路径；未命中（返回 undefined）则不做双链改写。 */
   pathForToken?: (token: string) => string | undefined;
-  /** token → 飞书原链接（mention_doc 未提供 url 时兜底，Task 5 用）。 */
+  /** token → 飞书原链接（mention_doc 未提供 url 时兜底）。 */
   urlForToken?: (token: string) => string | undefined;
 }
 
-/** BlockType 数值 → 名称（仅本任务覆盖的基础块，来自 feishu-docx 的 BlockType enum）。 */
+/** BlockType 数值 → 名称（来自 feishu-docx 的 BlockType enum；Task 5 补充复杂块与降级涉及的类型）。 */
 const enum BlockType {
   Page = 1,
   Text = 2,
@@ -24,7 +27,17 @@ const enum BlockType {
   Code = 14,
   Quote = 15,
   TodoList = 17,
+  Bitable = 18,
+  Callout = 19,
   Divider = 22,
+  File = 23,
+  Iframe = 26,
+  Image = 27,
+  Mindnote = 28,
+  Sheet = 30,
+  Table = 31,
+  TableCell = 32,
+  Board = 43,
 }
 
 /** code.style.language 数值 → 围栏代码块语言标注；查不到给空字符串（无语言标注）。 */
@@ -86,11 +99,29 @@ function wrapStyle(content: string, style: Record<string, unknown>): string {
 }
 
 /**
- * 渲染单个 element：text_run / equation / mention_user 是本任务范围；
- * mention_doc 先按 brief 降级为 `[标题](原url)`，Task 5 用 ctx.pathForToken 接管双链改写；
+ * mention_doc（正文里 @另一篇文档）渲染（spec §3.3-5 库内链接改写）：
+ * ctx.pathForToken 命中目标仓库路径 → 输出「本地相对路径 + 飞书原链接」双链；
+ * 未命中（未配置 pathForToken 或该 token 查不到）→ 退化为单个飞书链接。
+ * url 统一取 mention_doc.url ?? urlForToken(token) ?? selfUrl（保证任何情况下都有一个可跳转的链接）。
+ */
+function renderMentionDoc(doc: Record<string, unknown>, ctx: RenderCtx): string {
+  const title = asString(doc.title) || "文档";
+  const token = asString(doc.token);
+  const url = asString(doc.url) || ctx.urlForToken?.(token) || ctx.selfUrl;
+  const targetPath = ctx.pathForToken?.(token);
+  if (targetPath) {
+    // selfPath 缺省时直接用目标路径（无法计算相对路径，退而求其次给一个仓库内路径）
+    const relPath = ctx.selfPath ? path.posix.relative(path.posix.dirname(ctx.selfPath), targetPath) : targetPath;
+    return `[${title}](${relPath})（[飞书](${url})）`;
+  }
+  return `[${title}](${url})`;
+}
+
+/**
+ * 渲染单个 element：text_run / equation / mention_user / mention_doc；
  * 其余未知 element 类型（画板/附件引用等）静默跳过，不产出任何文本。
  */
-function renderElement(el: unknown, _ctx: RenderCtx): string {
+function renderElement(el: unknown, ctx: RenderCtx): string {
   const e = asRecord(el);
   if (e.text_run !== undefined) {
     const run = asRecord(e.text_run);
@@ -103,8 +134,7 @@ function renderElement(el: unknown, _ctx: RenderCtx): string {
     return `@${asString(asRecord(e.mention_user).user_id)}`;
   }
   if (e.mention_doc !== undefined) {
-    const doc = asRecord(e.mention_doc);
-    return `[${asString(doc.title)}](${asString(doc.url)})`;
+    return renderMentionDoc(asRecord(e.mention_doc), ctx);
   }
   return "";
 }
@@ -118,11 +148,58 @@ function renderRawText(elements: unknown[]): string {
   return elements.map((el) => asString(asRecord(asRecord(el).text_run).content)).join("");
 }
 
+/** 无法转换的复杂块占位（spec §3.3-6）：Bitable/Sheet/Board/Iframe/File/Mindnote 及一切未实现类型统一走此格式。 */
+function unsupportedPlaceholder(pad: string, blockType: number, ctx: RenderCtx): string {
+  return `${pad}> ⚠ 此处为无法转换的内容（type ${blockType}），请在飞书查看：[原文](${ctx.selfUrl})`;
+}
+
 interface Walker {
   map: Map<string, DocxBlock>;
   ctx: RenderCtx;
   /** 已渲染过的 block_id：防御畸形/成环的 children，避免重复渲染甚至递归爆栈。 */
   visited: Set<string>;
+}
+
+/**
+ * Table=31 渲染为 Markdown 表格（spec §3.3-6）：`table.property.row_size/column_size`
+ * 决定行列数，`table.cells` 是 TableCell（block_type=32）的 block_id 数组、行优先排列。
+ * 每个 cell 的内容 = 其 children 渲染后压成单行（换行替换为空格、`|` 转义为 `\|`）；
+ * 首行作表头，随后插入分隔行。cell 内容通过 renderBlocks 渲染，会把其 children 计入
+ * visited，避免与其他路径重复渲染。
+ */
+function renderTable(block: DocxBlock, pad: string, w: Walker): string {
+  const table = asRecord(block.table);
+  const property = asRecord(table.property);
+  const rowSize = Math.max(0, Math.trunc(Number(property.row_size)) || 0);
+  const colSize = Math.max(0, Math.trunc(Number(property.column_size)) || 0);
+  if (rowSize === 0 || colSize === 0) return "";
+  const cellIds = asArray(table.cells).filter((c): c is string => typeof c === "string");
+
+  const renderCell = (id: string | undefined): string => {
+    if (!id || w.visited.has(id)) return "";
+    const cell = w.map.get(id);
+    if (!cell) return "";
+    w.visited.add(id);
+    const kids = asArray(cell.children).filter((c): c is string => typeof c === "string");
+    const rendered = renderBlocks(kids, 0, w);
+    // 换行→空格：连续换行（多个子块间的空行分隔符 `\n\n`）也只压成一个空格，
+    // 不用 \s+（会连带吃掉正文里用户本来打的多个空格）
+    return rendered.replace(/\|/g, "\\|").replace(/[\r\n]+/g, " ").trim();
+  };
+
+  const rows: string[][] = [];
+  for (let r = 0; r < rowSize; r++) {
+    const row: string[] = [];
+    for (let c = 0; c < colSize; c++) row.push(renderCell(cellIds[r * colSize + c]));
+    rows.push(row);
+  }
+
+  const lines = [
+    `${pad}| ${rows[0].join(" | ")} |`,
+    `${pad}| ${rows[0].map(() => "---").join(" | ")} |`,
+    ...rows.slice(1).map((row) => `${pad}| ${row.join(" | ")} |`),
+  ];
+  return lines.join("\n");
 }
 
 /**
@@ -163,6 +240,20 @@ function renderBlock(block: DocxBlock, depth: number, orderedIndex: number, w: W
     }
     case BlockType.Divider:
       return `${pad}---`;
+    case BlockType.Table:
+      return renderTable(block, pad, w);
+    case BlockType.Callout: {
+      // Callout 本身无 elements，内容即 children；渲染后逐行加 `> ` 前缀，保底为引用块形式（spec §3.3-6）
+      const inner = renderBlocks(children, 0, w);
+      if (!inner) return "";
+      return inner
+        .split("\n")
+        .map((line) => `${pad}> ${line}`)
+        .join("\n");
+    }
+    case BlockType.Image:
+      // v1 不下载图片——保持仓库纯文本，二进制资产（图片/附件）留待后续版本处理（spec §3.3-6 取舍）
+      return `${pad}> 🖼 图片见原文：[${w.ctx.selfUrl}](${w.ctx.selfUrl})`;
     default: {
       // Heading1..Heading9（3..11）：级别 = block_type - 2，封顶 6（spec §3.3-3：飞书支持到 9 级，Markdown 只有 6 级）
       if (block.block_type >= BlockType.Heading1 && block.block_type <= BlockType.Heading9) {
@@ -171,9 +262,9 @@ function renderBlock(block: DocxBlock, depth: number, orderedIndex: number, w: W
         const line = pad + "#".repeat(level) + " " + renderElements(getElements(block, `heading${n}`), w.ctx);
         return appendChildren(line, children, depth, w, false);
       }
-      // 本任务未覆盖的块类型（表格/画板/多维表格等）留给 Task 5 的降级占位处理；
-      // 这里只保证 never throw——渲染为空，不吞掉兄弟块的分隔逻辑。
-      return "";
+      // Bitable/Sheet/Board/Iframe/File/Mindnote 及一切未实现类型：转换器对任何输入 never throw，
+      // 统一降级为「无法转换的内容」占位，附飞书原文链接方便用户手动查看（spec §3.3-6）。
+      return unsupportedPlaceholder(pad, block.block_type, w.ctx);
     }
   }
 }
