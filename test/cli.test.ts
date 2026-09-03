@@ -4,7 +4,7 @@ import path from "node:path";
 import os from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeOrigin, makeBareOrigin, g } from "./helpers.js";
+import { tmpDir, makeOrigin, makeBareOrigin, makeMirrorOrigin, g } from "./helpers.js";
 
 const CLI = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -150,6 +150,25 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.readFileSync(claude, "utf8")).toContain(kb);
     expect(fs.readFileSync(codex, "utf8")).toContain(kb);
     expect(r.out).toContain("全局提示词");
+  });
+
+  it("init 对镜像仓库只读接入：跳过种入规则、不产生新 commit、打印镜像说明", () => {
+    const mirrorBare = makeMirrorOrigin(root);
+    const kb = path.join(root, "kb-mirror");
+    const r = knowbase(["init", mirrorBare, "--dir", kb]);
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("只读镜像");
+    expect(r.out).toContain("lark-doc");
+
+    // 不产生新 commit：本地历史仍只有 exporter 侧的那一次 "mirror: init"，
+    // 经典路径本会在此追加一条「种入 union 规则」的 commit。
+    const log = g(kb, "log", "--oneline");
+    const lines = log.stdout.trim().split("\n").filter(Boolean);
+    expect(lines.length).toBe(1);
+    expect(log.stdout).toContain("mirror: init");
+
+    // 未种入 union / 忽略规则
+    expect(fs.existsSync(path.join(kb, ".gitattributes"))).toBe(false);
   });
 
   it("init 保留 Claude 已有全局偏好，仅追加托管区块", () => {

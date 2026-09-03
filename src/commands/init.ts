@@ -10,6 +10,7 @@ import {
   Logger,
 } from "../config.js";
 import * as git from "../git.js";
+import { isMirrorMode, setMirrorLock } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
 import { syncSkills, summarizeByTool } from "../skills-sync.js";
@@ -113,8 +114,25 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("  ✓ clone 完成");
   }
 
-  // git 身份提示（缺失时同步引擎会用临时身份兜底，不阻塞）
-  if (!git.hasIdentity(dir)) {
+  // 镜像仓库（存在 .knowbase-mirror.json）对成员侧全程只读（spec §4/§6）：
+  // 经典模式「本地是可写副本，需要种入合并规则、能 commit/push」这套假设
+  // 不成立，clone 后立即判断、就地分流，收窄的是后面这一大段的适用范围，
+  // 而不是靠散落各处的 if 判断。这里顺手做首次上锁，收窄「clone 完成到
+  // daemon 首个周期上锁」之间的无锁窗口。
+  const mirrorMode = isMirrorMode(dir);
+  if (mirrorMode) {
+    setMirrorLock(dir, true);
+    console.log("");
+    console.log("• 本目录是飞书知识库的只读镜像（真相源在飞书）：");
+    console.log("  修改请走各文件头部 frontmatter 的 feishu_url，用飞书文档工具编辑对应文档。");
+    console.log("  agent 写入依赖本机已配置的 lark 工具链（lark-doc / lark-wiki）；");
+    console.log("  未配置则 agent 只读，写入建议由人工在飞书完成（详见 spec §6）。");
+    console.log("");
+  }
+
+  // git 身份提示（缺失时同步引擎会用临时身份兜底，不阻塞）——镜像模式永不
+  // commit，这条提示无意义，跳过。
+  if (!mirrorMode && !git.hasIdentity(dir)) {
     console.warn("⚠ 未配置 git user.name/email，自动提交将使用临时身份 knowbase[主机名]。");
     console.warn('  建议配置：git config --global user.name "你的名字" && git config --global user.email "you@example.com"');
   }
@@ -133,14 +151,15 @@ export function cmdInit(url: string, opts: InitOptions): number {
 
   // 2.5 写权限预检。ls-remote 只验证读权限——只读成员会一路成功接入，
   // 然后每个周期默默推不上去。这里提前把事实说清楚，但不阻断：
-  // 只读同样是合法用法（能读到团队知识就已经有价值）。
+  // 只读同样是合法用法（能读到团队知识就已经有价值）。镜像仓库永不 push，
+  // 预检没有意义，跳过。
   //
   // 已知局限：pushDryRun 基于 `git push --dry-run`，只能反映传输层鉴权
   // （如 GitHub/GitLab 在 ref 协商之前就返回的 401/403）；服务端 hook 或
   // 保护分支一类需要真实提交命令才会触发的拒绝，dry-run 探测不到，要等
   // 真实 push 才会暴露，那时由守护进程内置的熔断器兜底（见 push-gate）。
   let readOnly = false;
-  if (headBorn) {
+  if (!mirrorMode && headBorn) {
     const dry = git.pushDryRun(dir, "origin", branch);
     readOnly = dry.denied;
     if (readOnly) {
@@ -153,34 +172,39 @@ export function cmdInit(url: string, opts: InitOptions): number {
     }
   }
 
-  // 3. 种入 union 合并规则与忽略规则（无则提交推送）
-  let seeded = false;
-  seeded = ensureLine(path.join(dir, ".gitattributes"), "*.md merge=union") || seeded;
-  seeded = ensureLine(path.join(dir, ".gitignore"), PAUSE_MARKER) || seeded;
-  if (seeded) {
-    console.log("• 种入 .gitattributes(union) / .gitignore 规则");
-    git.addAll(dir);
-    const c = git.commit(dir, "chore(knowbase): 种入 union 合并规则与忽略规则");
-    if (git.ok(c)) {
-      if (readOnly) {
-        console.log("  （只读模式：规则已本地提交，暂不推送）");
-      } else {
-        const p = git.push(dir, "origin", branch);
-        if (!p.ok) {
-          console.warn(
-            p.denied
-              ? "⚠ 规则已本地提交，但没有 push 权限——将以只读模式运行，补上写权限后自动恢复。"
-              : "⚠ 规则已本地提交，但推送未成功（守护进程会自动重试）。"
-          );
+  // 3. 种入 union 合并规则与忽略规则（无则提交推送）——镜像仓库的合并规则
+  // 与忽略规则由 exporter 侧维护，成员不 commit，跳过种入。
+  if (mirrorMode) {
+    console.log("• 镜像仓库跳过种入 union 合并规则 / 忽略规则（只读，由飞书侧维护）");
+  } else {
+    let seeded = false;
+    seeded = ensureLine(path.join(dir, ".gitattributes"), "*.md merge=union") || seeded;
+    seeded = ensureLine(path.join(dir, ".gitignore"), PAUSE_MARKER) || seeded;
+    if (seeded) {
+      console.log("• 种入 .gitattributes(union) / .gitignore 规则");
+      git.addAll(dir);
+      const c = git.commit(dir, "chore(knowbase): 种入 union 合并规则与忽略规则");
+      if (git.ok(c)) {
+        if (readOnly) {
+          console.log("  （只读模式：规则已本地提交，暂不推送）");
+        } else {
+          const p = git.push(dir, "origin", branch);
+          if (!p.ok) {
+            console.warn(
+              p.denied
+                ? "⚠ 规则已本地提交，但没有 push 权限——将以只读模式运行，补上写权限后自动恢复。"
+                : "⚠ 规则已本地提交，但推送未成功（守护进程会自动重试）。"
+            );
+          }
         }
+      } else {
+        console.warn(
+          `⚠ 规则文件已写入但提交失败（可能未配置 git user.name/email）：${(c.stderr || c.stdout).trim()}`
+        );
       }
     } else {
-      console.warn(
-        `⚠ 规则文件已写入但提交失败（可能未配置 git user.name/email）：${(c.stderr || c.stdout).trim()}`
-      );
+      console.log("• 仓库已含 union / 忽略规则");
     }
-  } else {
-    console.log("• 仓库已含 union / 忽略规则");
   }
 
   // 4. 保存配置
