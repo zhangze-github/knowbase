@@ -80,6 +80,14 @@ describe("setMirrorLock 只读锁", () => {
     setMirrorLock(dir, true);
     expect(() => fs.writeFileSync(path.join(dir, "a.md"), "x")).toThrow();
   });
+
+  it.skipIf(process.platform === "win32")("解锁后文件恢复可写（uninstall 路径依赖）", () => {
+    const dir = tmpDir("unlock");
+    fs.writeFileSync(path.join(dir, "a.md"), "a");
+    setMirrorLock(dir, true);
+    setMirrorLock(dir, false);
+    expect(() => fs.writeFileSync(path.join(dir, "a.md"), "可以写了")).not.toThrow();
+  });
 });
 
 describe("discardLocalChanges", () => {

@@ -129,6 +129,18 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 - **`name` 与 `description` 都是硬要求**：缺任一字段（或 `description` 为空）的 skill 会被跳过、不分发，`knowbase status` 里会列出原因。Claude Code 靠 `description` 判断何时触发一个 skill，缺了它等于分发一个装死的 skill，而团队会以为流程已经生效。
 - `knowbase uninstall` 会清掉所有带托管标记的团队 skill 副本，你自己的 skill（无论是否叫 `org-*`）原样保留。
 
+## 飞书镜像模式
+
+当知识库以飞书知识库为唯一真相源时（仓库由服务器上的 exporter 从飞书单向导出，仓库根带有 `.knowbase-mirror.json`），成员侧 knowbase 自动进入镜像模式，无需任何配置：
+
+- 本地目录是只读镜像：md 文件被设为只读；任何本地改动会在下个同步周期被直接丢弃（status 会给出警告）。修改知识请打开对应文件头部 frontmatter 里的 `feishu_url` 去飞书编辑；新增知识写到飞书知识库的「Agent 沉淀」目录。
+- agent 提示词区块自动切换为镜像版引导：读走本地 grep，写走飞书文档工具。
+- `skills/` 目录不走飞书：它是 git 原生区，通过仓库 PR 维护，照常自动分发。
+- `knowbase status` 额外显示镜像更新时间与全量对账时间；超过 30 分钟未更新会提示 exporter 可能停摆。
+- 权限注意：飞书侧的细粒度可见性不会带进镜像——能 clone 仓库的人可见全部导出内容，请只镜像对团队全员开放的 space（详见 docs/superpowers/specs/2026-09-02-lark-mirror-mode-design.md §10）。
+
+exporter 与一次性迁移工具（`knowbase exporter` / `knowbase migrate-to-lark`）见后续版本。
+
 ## 开机自启机制
 
 | 平台 | 机制 |

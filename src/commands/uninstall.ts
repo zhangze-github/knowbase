@@ -10,6 +10,7 @@ import {
 import { getAutostart } from "../platform/index.js";
 import { uninstallAgentConfig } from "../agent-config.js";
 import { uninstallSkills } from "../skills-sync.js";
+import { isMirrorMode, setMirrorLock } from "../mirror.js";
 
 /** `knowbase uninstall`：注销自启、停止守护进程、保留本地文件夹。 */
 export function cmdUninstall(): number {
@@ -37,6 +38,19 @@ export function cmdUninstall(): number {
   }
 
   clearDaemonState();
+
+  // 镜像模式下把上锁的文件恢复可写：uninstall 保留本地文件夹（product.md 非目标），
+  // 留一堆 444 文件会让用户之后整理自己的目录时莫名其妙
+  if (dir && isMirrorMode(dir)) {
+    try {
+      const n = setMirrorLock(dir, false);
+      if (n > 0) console.log(`• 已解除镜像只读锁（${n} 个文件恢复可写）`);
+    } catch (e) {
+      console.warn(
+        `⚠ 解除只读锁时出错：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+  }
 
   // 移除写入各 AI agent 全局提示词的托管区块
   try {
