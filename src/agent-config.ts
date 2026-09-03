@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
+import { isMirrorMode, readMirrorManifest } from "./mirror.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -11,6 +12,12 @@ import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
 
 export const BLOCK_START = "<!-- KNOWBASE:START （由 knowbase 自动管理，勿手动编辑本区块） -->";
 export const BLOCK_END = "<!-- KNOWBASE:END -->";
+
+/** 镜像模式注入区块所需信息（spec §5）。 */
+export interface MirrorBlockInfo {
+  /** 「Agent 沉淀」目录的飞书 wiki URL；exporter 侧未配置时缺失。 */
+  inboxUrl?: string;
+}
 
 export interface AgentTarget {
   /** 展示名。 */
@@ -125,8 +132,13 @@ export function readIndex(dir: string): IndexResult {
 /**
  * 生成托管区块正文（含起止标记），内嵌本机知识库目录与根索引快照。
  * index 传 null / undefined 时输出回退文案（索引维护 agent 还没跑起来的情况）。
+ * mirror 传 null / undefined 时输出经典文案；非 null 时切换为镜像模式文案（spec §5）。
  */
-export function buildBlock(dir: string, index?: string | null): string {
+export function buildBlock(
+  dir: string,
+  index?: string | null,
+  mirror?: MirrorBlockInfo | null
+): string {
   // 纯空白的索引（含零字节文件）也走回退文案：否则会输出一个有标题没正文的
   // 段落，且与 status 「存在但为空」的口径打架。
   const hasIndex = index != null && index.trim() !== "";
@@ -135,6 +147,32 @@ export function buildBlock(dir: string, index?: string | null): string {
 
 ${index}`
     : `根目录暂无 \`${INDEX_NAME}\`，需要时直接 grep 全库。`;
+
+  if (mirror) {
+    const inbox = mirror.inboxUrl
+      ? `：${mirror.inboxUrl}`
+      : "（沉淀目录 URL 未配置，请询问用户）";
+    return `${BLOCK_START}
+## 组织知识库（knowbase · 飞书镜像）
+
+\`${dir}\` —— 飞书知识库的**只读本地镜像**，全组织共享，后台自动从飞书单向同步。
+
+**读**：需要业务背景、历史决策、架构约定、环境配置、踩坑记录等组织隐性知识时，先 grep / 读该目录下的 Markdown。
+
+**写（重要，本目录只读）**：
+- 禁止直接编辑本目录任何文件——文件已设只读，写入会失败；绕过锁写入的内容也会在下个同步周期被自动丢弃。
+- 要修改某篇知识：取该文件头部 frontmatter 的 \`feishu_url\`，用飞书文档工具（lark-doc）编辑对应飞书文档。
+- 编辑前先用 lark-doc 读取该文档的最新内容——本地镜像可能落后几分钟，不要基于旧版整篇覆盖。
+- 要新增知识：用 lark-wiki 在「Agent 沉淀」目录下创建文档${inbox}。
+- 修改会在几分钟内自动回流到本目录；同一会话内如需引用刚写入的内容，以写进飞书的版本为准。
+
+**团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
+
+**导航**：每个目录下的 \`${INDEX_NAME}\` 是该目录索引（文件名大小写不敏感）。进子目录前先读它。
+
+${indexSection}
+${BLOCK_END}`;
+  }
 
   return `${BLOCK_START}
 ## 组织知识库（knowbase）
@@ -281,7 +319,12 @@ export function syncAgentConfig(
   home: string = os.homedir(),
   opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
-  const block = buildBlock(dir, readIndex(dir).text);
+  // 镜像仓库自动切换文案（spec §5）；清单损坏时 manifest 为 null，
+  // 仍走镜像文案（只是没有沉淀目录 URL）——见 isMirrorMode 的注释
+  const mirror = isMirrorMode(dir)
+    ? { inboxUrl: readMirrorManifest(dir)?.agent_inbox_url }
+    : null;
+  const block = buildBlock(dir, readIndex(dir).text, mirror);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);

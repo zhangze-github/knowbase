@@ -13,6 +13,7 @@ import {
   pickIndexName,
   readIndex,
   INDEX_MAX_BYTES,
+  MirrorBlockInfo,
 } from "../src/agent-config.js";
 import { tmpDir } from "./helpers.js";
 
@@ -441,5 +442,29 @@ describe("空索引结果不可变", () => {
       (r as { bytes: number }).bytes = 99;
     }).toThrow(TypeError);
     fs.rmSync(kb, { recursive: true, force: true });
+  });
+});
+
+describe("镜像模式区块文案", () => {
+  it("镜像变体：只读声明 + feishu_url 引导 + 沉淀目录 URL", () => {
+    const block = buildBlock("/kb", null, {
+      inboxUrl: "https://x.feishu.cn/wiki/AgentInbox123",
+    });
+    expect(block).toContain("只读本地镜像");
+    expect(block).toContain("feishu_url");
+    expect(block).toContain("lark-doc");
+    expect(block).toContain("https://x.feishu.cn/wiki/AgentInbox123");
+    // 经典文案的「保存即同步」不得出现——那句话在镜像模式下是错误引导
+    expect(block).not.toContain("保存即同步");
+  });
+
+  it("无沉淀目录 URL：提示询问用户", () => {
+    const block = buildBlock("/kb", null, {});
+    expect(block).toContain("询问用户");
+  });
+
+  it("第三参缺省：输出与经典文案逐字一致", () => {
+    expect(buildBlock("/kb", "索引内容")).toBe(buildBlock("/kb", "索引内容", null));
+    expect(buildBlock("/kb", "索引内容")).toContain("保存即同步");
   });
 });
