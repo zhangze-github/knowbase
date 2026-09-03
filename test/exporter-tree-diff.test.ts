@@ -17,7 +17,7 @@ describe("sanitizeTitle", () => {
     expect(sanitizeTitle("a/b:c*?")).toBe("a-b-c-");
     expect(sanitizeTitle("  x  ")).toBe("x");
     expect(sanitizeTitle('a<">b')).toBe("a-b");
-    expect(sanitizeTitle("///")).not.toBe("");
+    expect(sanitizeTitle("///")).toBe("");
   });
 });
 
@@ -48,6 +48,12 @@ describe("planPaths", () => {
     expect(m.has("R")).toBe(false);
     expect(m.has("X")).toBe(false);
     expect(m.get("K")!.path).toBe("孩子.md");
+  });
+
+  it("纯符号标题清洗为空，token 前 8 位兜底", () => {
+    const node = n({ node_token: "TOKEN12345", title: "///" });
+    const m = planPaths([node]);
+    expect(m.get("TOKEN12345")!.path).toBe("TOKEN123.md");
   });
 });
 

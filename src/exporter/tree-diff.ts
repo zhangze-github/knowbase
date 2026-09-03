@@ -19,12 +19,15 @@ export interface PlannedNode { node: WikiNode; path: string }
  * 的逻辑在 planPaths（这里拿不到 token）。
  */
 export function sanitizeTitle(title: string): string {
-  return title
+  const result = title
     .trim() // 先去首尾空白再替换：否则空白变成的 - 会残留在首尾
     // eslint-disable-next-line no-control-regex
     .replace(/[/\\:*?"<>|\x00-\x1f]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^\.+|[\s.]+$/g, "");
+  // 纯符号标题清洗为空字符串，让 planPaths 的空标题兜底（用 token 前 8 位）能触发（spec §3.3-4）
+  if (/^-*$/.test(result)) return "";
+  return result;
 }
 
 /**
