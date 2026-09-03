@@ -48,12 +48,17 @@
 
 在本机运行 exporter 进行单次验收，确保整个流程可用。
 
-导出到本地目录：
+`--repo` 必须指向一个**已 clone 的镜像仓库根目录**本身（exporter 会校验，指向非仓库目录
+或仓库内的子目录都会直接报错退出）。正式使用时应 `git clone` 你在步骤④准备好的真实镜像
+仓库；这里的冒烟验证图省事，先用 `git init` 建一个空仓库占位即可：
 
 ```bash
 export KNOWBASE_LARK_APP_ID="your-app-id"
 export KNOWBASE_LARK_APP_SECRET="your-app-secret"
 export KNOWBASE_LARK_SPACE="https://your-org.feishu.cn/wiki/space/your-space-id"
+
+# 冒烟用：先建一个空仓库占位（正式部署请改成 git clone 真实镜像仓库）
+git init ~/temp-repo
 
 # 初次导出，--once 表示单次运行后退出
 knowbase exporter \
@@ -75,6 +80,11 @@ knowbase exporter \
   ---
   # 正文开始
   ```
+
+- **首次真实运行务必额外检查**：若知识库中存在带 @文档引用（mention_doc）的页面，导出后
+  打开对应 `.md` 确认引用处出现了「本地相对路径 + 飞书原链接」的双链形式，而不是退化成
+  单个飞书链接——飞书对 wiki 文档的 mention 引用有时用的是 obj_token 而非 node_token，
+  这类命名空间差异只有跑真实数据才能验出来。
 
 若验收失败：
 - 检查应用凭证是否正确
@@ -100,14 +110,23 @@ KNOWBASE_MIRROR_REPO_URL=git@github.com:your-org/knowledge-base.git
 
 **第二步**：准备 SSH 凭证（如果使用 SSH）
 
-如果仓库 URL 是 SSH 形式（`git@github.com:...`），需要将 SSH 私钥挂进容器：
+如果仓库 URL 是 SSH 形式（`git@github.com:...`），需要将 SSH 私钥挂进容器。
+
+⚠️ **不要直接复制到 `~/.ssh/`**：容器以 root 运行、`docker run` 会把宿主机目录整个
+只读挂载为容器内的 `/root/.ssh`，如果这个宿主机目录就是你本机日常使用的 `~/.ssh`，
+`id_rsa` 这个文件名很可能与你自己的个人 SSH 私钥重名/混用。改用一个专用目录，只放
+这一份 deploy key：
 
 ```bash
-# 建立容器内 git 用户的 .ssh 目录
-mkdir -p ~/.ssh
+# 建立专用目录，只存放这个 exporter 用的 deploy key
+mkdir -p ~/knowbase-exporter-ssh
 # 复制你的 deploy key 私钥到该位置（权限 600）
-cp /path/to/deploy-key ~/.ssh/id_rsa
-chmod 600 ~/.ssh/id_rsa
+cp /path/to/deploy-key ~/knowbase-exporter-ssh/id_rsa
+chmod 600 ~/knowbase-exporter-ssh/id_rsa
+# 预置 known_hosts：容器内 .ssh 是只读挂载（-v ...:/root/.ssh:ro），ssh 首次连接时
+# 无法交互式确认并写入 known_hosts，必须提前在宿主机上写好（以 GitHub 为例，
+# 按实际托管方替换域名）
+ssh-keyscan github.com >> ~/knowbase-exporter-ssh/known_hosts
 ```
 
 **第三步**：构建 Docker 镜像
@@ -124,7 +143,7 @@ docker run -d \
   --restart always \
   --env-file ~/.knowbase-exporter.env \
   -v knowbase-repo:/data/repo \
-  -v ~/.ssh:/root/.ssh:ro \
+  -v ~/knowbase-exporter-ssh:/root/.ssh:ro \
   knowbase-exporter:latest
 ```
 
@@ -143,7 +162,7 @@ services:
       - KNOWBASE_MIRROR_REPO_URL=${KNOWBASE_MIRROR_REPO_URL}
     volumes:
       - knowbase-repo:/data/repo
-      - ~/.ssh:/root/.ssh:ro
+      - ~/knowbase-exporter-ssh:/root/.ssh:ro
 volumes:
   knowbase-repo:
 ```
@@ -158,9 +177,15 @@ docker-compose up -d
 
 **第一步**：创建 knowbase 用户（非 root）
 
+`-d /var/lib/knowbase -m` 缺一不可：`-d` 把该用户 passwd 记录里的 HOME 设为
+`/var/lib/knowbase`，`-m` 实际创建这个目录。下面第三步会把 git 仓库、SSH key、
+`.gitconfig` 都放进 `/var/lib/knowbase`——如果不显式指定 HOME，`sudo -u knowbase`
+或 systemd `User=knowbase` 拿到的 `$HOME` 会是系统默认值（多数发行版是
+`/home/knowbase`，且目录并不存在），git/ssh 会去错误的位置找配置，实际却完全找不到
+你放好的那些文件：
+
 ```bash
-sudo useradd -r -s /bin/false knowbase
-sudo mkdir -p /var/lib/knowbase
+sudo useradd -r -d /var/lib/knowbase -m -s /bin/false knowbase
 sudo chown knowbase:knowbase /var/lib/knowbase
 ```
 
