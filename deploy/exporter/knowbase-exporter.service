@@ -1,0 +1,19 @@
+[Unit]
+Description=knowbase Lark exporter daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+EnvironmentFile=/etc/knowbase/exporter.env
+ExecStart=/usr/bin/env knowbase exporter --repo /var/lib/knowbase/repo --space ${KNOWBASE_LARK_SPACE}
+# It is recommended to run knowbase exporter under a dedicated non-root user.
+# Create user and group with: sudo useradd -r -s /bin/false knowbase
+User=knowbase
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
