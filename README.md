@@ -163,15 +163,9 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 
 ## 部署 exporter（飞书 → 仓库）
 
-建立镜像仓库的起点是将飞书知识库导出到 Git。`knowbase exporter` 命令可部署为常驻守护进程，定时轮询飞书并推送更新到仓库；成员 `init` 时自动进入镜像模式，无需任何配置。
+建立镜像仓库的起点是将飞书知识库导出到 Git。`knowbase exporter` 部署为常驻守护进程，定时轮询飞书并推送更新到仓库；成员 `init` 时自动进入镜像模式，无需任何配置。
 
-部署包括三个核心文件（位于 `deploy/exporter/`）：
-
-- **Dockerfile** — 打包 exporter 运行环境，支持 Docker / Kubernetes 部署
-- **knowbase-exporter.service** — systemd 单元文件，用于 Linux 服务器部署
-- **README.md** — 完整的 7 步操作手册：飞书应用创建 → 权限申请 → 加成员 → 冒烟验证 → 选择部署方案（Docker 或 systemd）
-
-详见 [`deploy/exporter/README.md`](deploy/exporter/README.md) 了解部署全流程。
+`deploy/exporter/` 包含：**Dockerfile**（Docker 部署）、**knowbase-exporter.service**（systemd 部署）、**README.md**（完整 7 步手册：应用创建 → 权限申请 → 加成员 → 冒烟验证 → 部署）。详见 [`deploy/exporter/README.md`](deploy/exporter/README.md)。
 
 ## 开机自启机制
 

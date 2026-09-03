@@ -52,7 +52,7 @@
 
 ```bash
 export KNOWBASE_LARK_APP_ID="your-app-id"
-export KNOWBASE_LARK_SECRET="your-app-secret"
+export KNOWBASE_LARK_APP_SECRET="your-app-secret"
 export KNOWBASE_LARK_SPACE="https://your-org.feishu.cn/wiki/space/your-space-id"
 
 # 初次导出，--once 表示单次运行后退出
@@ -93,7 +93,7 @@ knowbase exporter \
 
 ```bash
 KNOWBASE_LARK_APP_ID=your-app-id
-KNOWBASE_LARK_SECRET=your-app-secret
+KNOWBASE_LARK_APP_SECRET=your-app-secret
 KNOWBASE_LARK_SPACE=https://your-org.feishu.cn/wiki/space/your-space-id
 KNOWBASE_MIRROR_REPO_URL=git@github.com:your-org/knowledge-base.git
 ```
@@ -110,7 +110,13 @@ cp /path/to/deploy-key ~/.ssh/id_rsa
 chmod 600 ~/.ssh/id_rsa
 ```
 
-**第三步**：运行 Docker 容器
+**第三步**：构建 Docker 镜像
+
+```bash
+docker build -t knowbase-exporter:latest deploy/exporter/
+```
+
+**第四步**：运行 Docker 容器
 
 ```bash
 docker run -d \
@@ -132,7 +138,7 @@ services:
     restart: always
     environment:
       - KNOWBASE_LARK_APP_ID=${KNOWBASE_LARK_APP_ID}
-      - KNOWBASE_LARK_SECRET=${KNOWBASE_LARK_SECRET}
+      - KNOWBASE_LARK_APP_SECRET=${KNOWBASE_LARK_APP_SECRET}
       - KNOWBASE_LARK_SPACE=${KNOWBASE_LARK_SPACE}
       - KNOWBASE_MIRROR_REPO_URL=${KNOWBASE_MIRROR_REPO_URL}
     volumes:
@@ -165,21 +171,49 @@ sudo chown knowbase:knowbase /var/lib/knowbase
 ```bash
 sudo tee /etc/knowbase/exporter.env > /dev/null <<EOF
 KNOWBASE_LARK_APP_ID=your-app-id
-KNOWBASE_LARK_SECRET=your-app-secret
+KNOWBASE_LARK_APP_SECRET=your-app-secret
 KNOWBASE_LARK_SPACE=https://your-org.feishu.cn/wiki/space/your-space-id
 EOF
 sudo chmod 600 /etc/knowbase/exporter.env
 sudo chown knowbase:knowbase /etc/knowbase/exporter.env
 ```
 
-**第三步**：安装 systemd 单元文件
+**第三步**：预 clone 镜像仓库
+
+systemd 服务的 ExecStart 直接调用 knowbase exporter，不像 Docker entrypoint 那样自动 clone。需要提前准备好仓库：
+
+```bash
+# 以 knowbase 用户身份 clone 仓库
+sudo -u knowbase git clone git@github.com:your-org/knowledge-base.git /var/lib/knowbase/repo
+
+# 配置该用户的 git 身份和推送凭证
+sudo -u knowbase git -C /var/lib/knowbase/repo config user.name "knowbase-exporter"
+sudo -u knowbase git -C /var/lib/knowbase/repo config user.email "exporter@knowbase.local"
+
+# 如果使用 SSH 推送，配置 SSH key（或使用 deploy key）
+# 例如：将私钥复制到 knowbase 用户的 ~/.ssh/
+sudo mkdir -p /var/lib/knowbase/.ssh
+sudo cp /path/to/deploy-key /var/lib/knowbase/.ssh/id_rsa
+sudo chmod 600 /var/lib/knowbase/.ssh/id_rsa
+sudo chown -R knowbase:knowbase /var/lib/knowbase/.ssh
+```
+
+若使用 PAT 或 HTTPS 凭证，配置 `~/.config/git/credentials` 或 `.gitconfig`：
+
+```bash
+# 或者使用 git 凭证存储（推荐用于 HTTPS）
+sudo -u knowbase git config --global credential.helper store
+# 然后在首次 push 时输入凭证
+```
+
+**第四步**：安装 systemd 单元文件
 
 ```bash
 sudo cp knowbase-exporter.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
 
-**第四步**：启动服务
+**第五步**：启动服务
 
 ```bash
 sudo systemctl enable knowbase-exporter    # 开机自启
@@ -230,7 +264,7 @@ sudo journalctl -u knowbase-exporter -n 50 # 最近 50 行
 | 变量 | 是否必需 | 说明 |
 |------|---------|------|
 | `KNOWBASE_LARK_APP_ID` | 是 | 飞书应用 App ID |
-| `KNOWBASE_LARK_SECRET` | 是 | 飞书应用 App Secret |
+| `KNOWBASE_LARK_APP_SECRET` | 是 | 飞书应用 App Secret |
 | `KNOWBASE_LARK_SPACE` | 是 | 知识库 space URL（如 `https://org.feishu.cn/wiki/space/123`） |
 | `KNOWBASE_MIRROR_REPO_URL` | 仅初次 | Git 仓库 URL，首次 clone 时必需；之后可省略 |
 | `KNOWBASE_EXPORTER_EXTRA_ARGS` | 否 | 传递给 `knowbase exporter` 的额外参数（如 `--interval 300` 覆盖默认同步间隔） |

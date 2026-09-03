@@ -27,5 +27,6 @@ git -C "$REPO_DIR" config user.name "knowbase-exporter"
 git -C "$REPO_DIR" config user.email "exporter@knowbase.local"
 
 # Execute knowbase exporter command
-# Note: secrets KNOWBASE_LARK_APP_ID and KNOWBASE_LARK_SECRET are passed via environment variables
+# Note: secrets KNOWBASE_LARK_APP_ID and KNOWBASE_LARK_APP_SECRET are passed via environment variables
+# KNOWBASE_EXPORTER_EXTRA_ARGS is intentionally unquoted to allow word-splitting of multiple arguments
 exec knowbase exporter --repo "$REPO_DIR" --space "$SPACE" ${KNOWBASE_EXPORTER_EXTRA_ARGS}
