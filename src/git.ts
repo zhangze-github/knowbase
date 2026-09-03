@@ -88,6 +88,13 @@ export function isRepo(dir: string): boolean {
   return ok(git(["rev-parse", "--is-inside-work-tree"], { cwd: dir }));
 }
 
+/** dir 所在 git 仓库的工作区根目录（trim 后的绝对路径）；dir 不在任何仓库内则 null。 */
+export function toplevel(dir: string): string | null {
+  const r = git(["rev-parse", "--show-toplevel"], { cwd: dir });
+  if (r.code !== 0) return null;
+  return r.stdout.trim();
+}
+
 export function clone(url: string, dir: string, timeoutMs = 120000): GitResult {
   return git(["clone", url, dir], { timeoutMs });
 }

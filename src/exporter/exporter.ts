@@ -119,6 +119,7 @@ async function renderBody(
   client: LarkClientLike,
   p: PlannedNode,
   planned: Map<string, PlannedNode>,
+  byObjToken: Map<string, PlannedNode>,
   host: string
 ): Promise<string> {
   const selfUrl = `https://${host}/wiki/${p.node.node_token}`;
@@ -127,9 +128,11 @@ async function renderBody(
     return renderDocxToMarkdown(blocks, {
       selfUrl,
       selfPath: p.path,
-      pathForToken: (t) => planned.get(t)?.path,
+      // 先按 node_token 查，未命中再退化按 obj_token 查（见 runExportOnce 里 byObjToken
+      // 的注释：mention_doc.token 对 wiki 文档可能落在 obj_token 命名空间）。
+      pathForToken: (t) => planned.get(t)?.path ?? byObjToken.get(t)?.path,
       urlForToken: (t) => {
-        const target = planned.get(t);
+        const target = planned.get(t) ?? byObjToken.get(t);
         return target ? `https://${host}/wiki/${target.node.node_token}` : undefined;
       },
     });
@@ -159,10 +162,20 @@ export async function runExportOnce(
   try {
     // 1. 读 manifest，首轮没有则新建
     const manifest = readExporterManifest(cfg.repoDir) ?? newManifest(cfg.spaceId, cfg.host, cfg.inboxUrl);
+    // 已有 manifest 时 newManifest 不会被调用，--inbox-url 就吃不到——运营者后补/更换
+    // 收件箱链接必须能生效（spec §5），这里补上「已有 manifest」路径的更新。
+    if (cfg.inboxUrl && manifest.agent_inbox_url !== cfg.inboxUrl) {
+      manifest.agent_inbox_url = cfg.inboxUrl;
+    }
 
     // 2. 拉整棵树 → 规划路径 → 与旧状态 diff
     const nodes = await client.listAllSpaceNodes(cfg.spaceId, cfg.rootToken);
     const planned = planPaths(nodes, cfg.rootToken);
+    // mention_doc.token 的命名空间不总是 node_token：飞书历史上对 wiki 文档的 mention
+    // 引用有时给的是 obj_token（fixture 形状踩过坑，真实运行需验收）。额外建一张按
+    // obj_token 查的索引，pathForToken/urlForToken 命中失败时兜底查一次。
+    const byObjToken = new Map<string, PlannedNode>();
+    for (const p of planned.values()) byObjToken.set(p.node.obj_token, p);
     const diff = diffTree(planned, manifest.nodes);
 
     // 3. toMove：git mv，失败降级 fs.renameSync，均失败则记入 moveSkip（Important#2：
@@ -233,7 +246,7 @@ export async function runExportOnce(
 
       let body: string;
       try {
-        body = await renderBody(client, p, planned, cfg.host);
+        body = await renderBody(client, p, planned, byObjToken, cfg.host);
       } catch (e) {
         // 单篇失败（如 listDocBlocks 抛错）：记日志、跳过、不更新该节点 manifest（下轮重试），
         // 不置 result.error——这是「部分失败」而非「本轮致命错误」（spec §3.6）

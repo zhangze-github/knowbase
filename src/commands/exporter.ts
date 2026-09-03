@@ -1,5 +1,7 @@
+import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_BRANCH, Logger, exporterLogPath } from "../config.js";
+import * as git from "../git.js";
 import { LarkClient } from "../exporter/lark-client.js";
 import { runExportOnce, runExporterDaemon, ExporterConfig } from "../exporter/exporter.js";
 
@@ -121,6 +123,11 @@ export function parseExporterArgs(
   const inboxUrl = typeof opts.inboxUrl === "string" && opts.inboxUrl.trim() !== "" ? opts.inboxUrl.trim() : undefined;
   const once = opts.once === true;
   const full = opts.full === true;
+  // --full 传给 daemon 会让 fullCheckMs 恒为 0：每一轮都变成全量对账，
+  // 24h 窗口形同虚设、白白拉全树重渲染——只在 --once 场景下这是「本轮强制」的一次性行为。
+  if (full && !once) {
+    errors.push("--full 只能与 --once 连用（daemon 模式每 24h 自动全量对账）");
+  }
 
   // env 凭据不走 CLI 参数，避免落进 shell history（brief）。
   const appId = env.KNOWBASE_LARK_APP_ID?.trim() ?? "";
@@ -160,6 +167,27 @@ export function parseExporterArgs(
 }
 
 /**
+ * 校验 `--repo` 必须是已 clone 镜像仓库的根目录本身（finding#1）：
+ * - 指向非 git 目录：exporter 每轮都会静默 add/commit 失败（git 报错），却对外表现为
+ *   「一直不发布」，很难定位；
+ * - 指向某个仓库内部的子目录：git 命令会顺着 --show-toplevel 找到上级仓库根，
+ *   导致改动被提交/推送到一个用户完全没预料到的（可能是别人的）origin。
+ * 抽成独立的薄函数（内部仍需 shell 出 git + fs.realpathSync，非纯函数）方便单测两种坏路径。
+ */
+export function validateRepoRoot(repoDir: string): string | null {
+  const REPO_ROOT_ERROR =
+    "--repo 必须指向一个已 clone 的镜像仓库根目录（当前不是 git 仓库根）：先 git clone <镜像仓库> 再指向它";
+  const top = git.toplevel(repoDir);
+  if (top === null) return REPO_ROOT_ERROR;
+  try {
+    if (fs.realpathSync(top) !== fs.realpathSync(repoDir)) return REPO_ROOT_ERROR;
+  } catch {
+    return REPO_ROOT_ERROR;
+  }
+  return null;
+}
+
+/**
  * `knowbase exporter`：解析参数 → 组装 LarkClient/Logger → `--once` 跑一轮，
  * 否则起守护循环。节点 URL 形态（parsed.nodeToken 有值且 spaceId 为空）需要先用
  * client.getNode 解析出 space_id；此时若用户没有显式 --root，节点 token 本身
@@ -170,6 +198,12 @@ export async function cmdExporter(opts: Record<string, string | boolean | undefi
   if (parsed.errors.length > 0) {
     console.error("✗ 无法启动 exporter：");
     for (const e of parsed.errors) console.error(`  - ${e}`);
+    return 2;
+  }
+
+  const repoRootError = validateRepoRoot(parsed.repoDir);
+  if (repoRootError) {
+    console.error(`✗ ${repoRootError}`);
     return 2;
   }
 

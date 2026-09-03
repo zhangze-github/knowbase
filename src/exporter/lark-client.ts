@@ -120,7 +120,7 @@ export class LarkClient {
   }
 
   async getNode(token: string): Promise<{ space_id: string; node: WikiNode }> {
-    // 飞书 wiki-v2 get_node 官方响应中 space_id 位于 data.node 内部（非 data 顶层同级字段）；spec §3.2。
+    // 飞书 wiki-v2 get_node 官方响应中 space_id 位于 data.node 内部（非 data 顶层同级字段）。
     const data = await this.request<{ node: WikiNode & { space_id?: string } }>(
       "GET", "/open-apis/wiki/v2/spaces/get_node", { token }
     );

@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import path from "node:path";
 import { describe, it, expect } from "vitest";
 import { tmpDir, makeEmptyOrigin, cloneWorkdir } from "./helpers.js";
 import { Logger } from "../src/config.js";
-import { parseExporterArgs } from "../src/commands/exporter.js";
+import { parseExporterArgs, validateRepoRoot } from "../src/commands/exporter.js";
 import { runExporterDaemon, ExporterConfig, LarkClientLike } from "../src/exporter/exporter.js";
 import type { WikiNode } from "../src/exporter/tree-diff.js";
 import type { DocxBlock } from "../src/exporter/lark-client.js";
@@ -122,6 +123,45 @@ describe("parseExporterArgs", () => {
   it("缺 --repo → errors 非空", () => {
     const r = parseExporterArgs({ space: "7123456", host: "h" }, fullEnv);
     expect(r.errors.length).toBeGreaterThan(0);
+  });
+
+  it("--full 不带 --once → errors 含「--full 只能与 --once 连用」字样", () => {
+    const r = parseExporterArgs(
+      { repo: "/tmp/repo", space: "7123456", host: "h", full: true },
+      fullEnv
+    );
+    expect(r.errors.some((e) => e.includes("--full") && e.includes("--once"))).toBe(true);
+  });
+
+  it("--full 配 --once → 不报错", () => {
+    const r = parseExporterArgs(
+      { repo: "/tmp/repo", space: "7123456", host: "h", full: true, once: true },
+      fullEnv
+    );
+    expect(r.errors).toEqual([]);
+  });
+});
+
+describe("validateRepoRoot（finding#1：--repo 必须是镜像仓库根目录本身）", () => {
+  it("非 git 目录 → 返回错误消息", () => {
+    const dir = tmpDir("exp-repo-notgit");
+    const msg = validateRepoRoot(dir);
+    expect(msg).toBeTruthy();
+    expect(msg).toContain("--repo");
+  });
+
+  it("git 仓库内的嵌套子目录 → 返回错误消息（防止误推到上级仓库的 origin）", () => {
+    const root = tmpDir("exp-repo-nested");
+    const bare = makeEmptyOrigin(root);
+    const dir = path.join(root, "work");
+    cloneWorkdir(bare, dir);
+    const sub = path.join(dir, "sub", "dir");
+    fs.mkdirSync(sub, { recursive: true });
+
+    expect(validateRepoRoot(dir)).toBeNull(); // 仓库根本身合法
+    const msg = validateRepoRoot(sub);
+    expect(msg).toBeTruthy();
+    expect(msg).toContain("--repo");
   });
 });
 

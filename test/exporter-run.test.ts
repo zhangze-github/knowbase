@@ -439,6 +439,58 @@ describe("增量周期与全量对账", () => {
   );
 });
 
+describe("--inbox-url 对已有 manifest 生效（finding#4）", () => {
+  it("首轮无 inbox → 第二轮带 inboxUrl → manifest 更新且该轮至少心跳提交", async () => {
+    const root = tmpDir("exp-inbox-update");
+    const bare = makeEmptyOrigin(root);
+    const dir = path.join(root, "work");
+    cloneWorkdir(bare, dir);
+
+    const A = node({ node_token: "A", obj_token: "oA", title: "甲" });
+    const client = new FakeClient([A], { oA: textBlocks("甲正文") });
+    const now = ticker();
+
+    const cfg1: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
+    const r1 = await runExportOnce(cfg1, { client, logger: quietLogger(root), now });
+    expect(r1.error).toBeUndefined();
+    expect(readExporterManifest(dir)!.agent_inbox_url).toBeUndefined();
+
+    const cfg2: ExporterConfig = { ...cfg1, inboxUrl: "https://acme.feishu.cn/wiki/AgentInbox1" };
+    const r2 = await runExportOnce(cfg2, { client, logger: quietLogger(root), now });
+    expect(r2.error).toBeUndefined();
+    expect(r2.committed).toBe(true); // manifest 变化 → hasChanges 为真 → 至少心跳提交
+    expect(readExporterManifest(dir)!.agent_inbox_url).toBe("https://acme.feishu.cn/wiki/AgentInbox1");
+  });
+});
+
+describe("mention_doc.token 命名空间兜底（finding#5：obj_token 而非 node_token）", () => {
+  it("mention_doc.token 用目标节点的 obj_token → 仍命中相对路径双链", async () => {
+    const root = tmpDir("exp-mention-objtoken");
+    const bare = makeEmptyOrigin(root);
+    const dir = path.join(root, "work");
+    cloneWorkdir(bare, dir);
+
+    const A = node({ node_token: "A", obj_token: "oA", title: "甲" });
+    const B = node({ node_token: "B", obj_token: "oB", title: "乙" });
+    const mentionBlocks: DocxBlock[] = [
+      { block_id: "page", block_type: 1, children: ["t1"] },
+      {
+        block_id: "t1",
+        block_type: 2,
+        parent_id: "page",
+        text: { elements: [{ mention_doc: { token: "oB", title: "乙" } }] },
+      },
+    ];
+    const client = new FakeClient([A, B], { oA: mentionBlocks, oB: textBlocks("乙正文") });
+    const cfg: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
+    const result = await runExportOnce(cfg, { client, logger: quietLogger(root) });
+
+    expect(result.error).toBeUndefined();
+    const content = read(dir, "甲.md");
+    expect(content).toContain("[乙](乙.md)（[飞书](https://acme.feishu.cn/wiki/B)）");
+  });
+});
+
 describe("tryMoveNode（纯逻辑：Important#2 移动失败判定）", () => {
   it("git mv 成功：直接返回 true，不调用 rename 降级", () => {
     const calls: string[] = [];
