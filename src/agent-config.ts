@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
-import { isMirrorMode, readMirrorManifest } from "./mirror.js";
+import { isMirrorMode } from "./mirror.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -13,11 +13,13 @@ import { isMirrorMode, readMirrorManifest } from "./mirror.js";
 export const BLOCK_START = "<!-- KNOWBASE:START （由 knowbase 自动管理，勿手动编辑本区块） -->";
 export const BLOCK_END = "<!-- KNOWBASE:END -->";
 
-/** 镜像模式注入区块所需信息（spec §5）。 */
-export interface MirrorBlockInfo {
-  /** 「Agent 沉淀」目录的飞书 wiki URL；exporter 侧未配置时缺失。 */
-  inboxUrl?: string;
-}
+/**
+ * 镜像模式注入区块所需信息（spec §5）。
+ * 曾有 inboxUrl（「Agent 沉淀」目录）字段，已按产品决策移除：AI 与人的编辑平权，
+ * 新增文档由 agent 参照目录树自行判断归属，不设专属 AI 目录。保留空接口以便
+ * 未来携带其他仓库级信息。
+ */
+export interface MirrorBlockInfo {}
 
 export interface AgentTarget {
   /** 展示名。 */
@@ -146,9 +148,6 @@ ${tree}`
     : `知识库暂无文件，需要时直接 grep 全库。`;
 
   if (mirror) {
-    const inbox = mirror.inboxUrl
-      ? `：${mirror.inboxUrl}`
-      : "（沉淀目录 URL 未配置，请询问用户）";
     return `${BLOCK_START}
 ## 组织知识库（knowbase · 飞书镜像）
 
@@ -156,11 +155,12 @@ ${tree}`
 
 **读**：需要业务背景、历史决策、架构约定、环境配置、踩坑记录等组织隐性知识时，先 grep / 读该目录下的 Markdown。
 
-**写（重要，本目录只读）**：
+**写（重要，本目录只读，写入走飞书）**：
 - 禁止直接编辑本目录任何文件——文件已设只读，写入会失败；绕过锁写入的内容也会在下个同步周期被自动丢弃。
 - 要修改某篇知识：取该文件头部 frontmatter 的 \`feishu_url\`，用飞书文档工具（lark-doc）编辑对应飞书文档。
 - 编辑前先用 lark-doc 读取该文档的最新内容——本地镜像可能落后几分钟，不要基于旧版整篇覆盖。
-- 要新增知识：用 lark-wiki 在「Agent 沉淀」目录下创建文档${inbox}。
+- 要新增知识：优先补充进已有的相关文档；确需新文档时，用 lark-wiki 创建，并参照下方目录树自行判断挂到哪个节点下最合适。你的编辑与人类成员完全平权，没有专属 AI 的目录。
+- 只沉淀对整个组织/团队有复用价值的内容：业务规则与背景、技术决策及其原因、公共环境/服务配置、通用踩坑与解决方案、跨项目约定。个人偏好与习惯、个人待办/日程/草稿、仅与本机或当前个人任务相关的内容、个人隐私信息——一律不进知识库；拿不准先询问用户。
 - 修改会在几分钟内自动回流到本目录；同一会话内如需引用刚写入的内容，以写进飞书的版本为准。
 
 **团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
@@ -316,11 +316,8 @@ export function syncAgentConfig(
   home: string = os.homedir(),
   opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
-  // 镜像仓库自动切换文案（spec §5）；清单损坏时 manifest 为 null，
-  // 仍走镜像文案（只是没有沉淀目录 URL）——见 isMirrorMode 的注释
-  const mirror = isMirrorMode(dir)
-    ? { inboxUrl: readMirrorManifest(dir)?.agent_inbox_url }
-    : null;
+  // 镜像仓库自动切换文案（spec §5）——见 isMirrorMode 的注释
+  const mirror = isMirrorMode(dir) ? {} : null;
   const block = buildBlock(dir, readKbTree(dir).text, mirror);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {

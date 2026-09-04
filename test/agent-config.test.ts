@@ -431,20 +431,24 @@ describe("原子写安全性（并发 / 软链）", () => {
 });
 
 describe("镜像模式区块文案", () => {
-  it("镜像变体：只读声明 + feishu_url 引导 + 沉淀目录 URL", () => {
-    const block = buildBlock("/kb", null, {
-      inboxUrl: "https://x.feishu.cn/wiki/AgentInbox123",
-    });
+  it("镜像变体：只读声明 + feishu_url 引导 + 平权自主归属，无专属 AI 目录", () => {
+    const block = buildBlock("/kb", null, {});
     expect(block).toContain("只读本地镜像");
     expect(block).toContain("feishu_url");
     expect(block).toContain("lark-doc");
-    expect(block).toContain("https://x.feishu.cn/wiki/AgentInbox123");
+    // 产品决策：AI 与人编辑平权，agent 参照目录树自行判断归属，不设专属目录
+    expect(block).toContain("平权");
+    expect(block).toContain("自行判断");
+    expect(block).not.toContain("Agent 沉淀");
     // 经典文案的「保存即同步」不得出现——那句话在镜像模式下是错误引导
     expect(block).not.toContain("保存即同步");
   });
 
-  it("无沉淀目录 URL：提示询问用户", () => {
+  it("镜像变体：组织/个人内容边界写明", () => {
     const block = buildBlock("/kb", null, {});
+    expect(block).toContain("复用价值");
+    expect(block).toContain("个人偏好");
+    expect(block).toContain("不进知识库");
     expect(block).toContain("询问用户");
   });
 
