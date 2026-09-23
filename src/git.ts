@@ -156,11 +156,6 @@ export function commit(dir: string, message: string): GitResult {
   return git([...identityArgs(dir), "commit", "-m", message], { cwd: dir });
 }
 
-/** 完成一次 merge 提交（沿用 git 准备好的 MERGE_MSG）。 */
-export function commitNoEdit(dir: string): GitResult {
-  return git([...identityArgs(dir), "commit", "--no-edit"], { cwd: dir });
-}
-
 export function fetch(dir: string, remote: string, timeoutMs = 60000): GitResult {
   return git(["fetch", remote], { cwd: dir, timeoutMs });
 }
@@ -189,42 +184,9 @@ export function upstreamExists(dir: string, upstream: string): boolean {
   return ok(git(["rev-parse", "--verify", "--quiet", upstream], { cwd: dir }));
 }
 
-/** merge 指定 ref；返回结果（冲突时 code!=0，由调用方处理冲突副本）。 */
-export function merge(dir: string, ref: string): GitResult {
-  // merge 也会产生提交，同样需要身份兜底
-  return git([...identityArgs(dir), "merge", "--no-edit", ref], { cwd: dir });
-}
-
-/** 处于冲突（未合并）状态的文件列表。 */
-export function unmergedFiles(dir: string): string[] {
-  const r = git(["diff", "--name-only", "--diff-filter=U"], { cwd: dir });
-  if (r.code !== 0) return [];
-  return r.stdout.split("\n").map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-/** 取冲突文件的「本地版本」(stage 2) 内容；不存在（删改冲突）返回 null。 */
-export function showStage2(dir: string, file: string): Buffer | null {
-  const r = gitBuffer(["show", `:2:${file}`], { cwd: dir });
-  if (r.code !== 0) return null;
-  return r.stdout;
-}
-
-/** 冲突文件采用远端版本。 */
-export function checkoutTheirs(dir: string, file: string): GitResult {
-  return git(["checkout", "--theirs", "--", file], { cwd: dir });
-}
-
-export function rm(dir: string, file: string): GitResult {
-  return git(["rm", "-f", "--", file], { cwd: dir });
-}
-
 /** git mv（薄封装，exporter 移动节点导出路径用；调用方负责先 mkdirSync 目标目录）。 */
 export function mv(dir: string, from: string, to: string): GitResult {
   return git(["mv", from, to], { cwd: dir });
-}
-
-export function addPath(dir: string, file: string): GitResult {
-  return git(["add", "--", file], { cwd: dir });
 }
 
 /** push 失败的语义分类。 */
@@ -325,21 +287,6 @@ export function push(
   timeoutMs = 60000
 ): PushOutcome {
   return runPush(dir, remote, branch, timeoutMs, false);
-}
-
-/**
- * 只反映传输层鉴权：HTTPS 对无 push 权限用户在 info/refs 阶段即返回 401/403，
- * SSH 由服务端在 spawn receive-pack 前拒绝。服务端 hook / 保护分支类策略拒绝
- * 探测不到（--dry-run 不发送 ref 更新、不触发 pre-receive），那类要等真实 push
- * 才暴露，由守护进程的熔断兜底。
- */
-export function pushDryRun(
-  dir: string,
-  remote: string,
-  branch: string,
-  timeoutMs = 30000
-): PushOutcome {
-  return runPush(dir, remote, branch, timeoutMs, true);
 }
 
 /** 是否配置了 origin 远端。 */

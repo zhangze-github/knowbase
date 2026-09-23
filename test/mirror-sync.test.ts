@@ -25,15 +25,12 @@ function setup() {
   return { root, bare, dir, cfg, logger };
 }
 
-describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
+describe("syncOnce（飞书镜像）", () => {
   it("识别镜像仓库：不提交、不推送，本地改动被丢弃并上报", () => {
     const { dir, cfg, logger } = setup();
     write(dir, "docs/guide.md", "被本地篡改\n");
     write(dir, "rogue.md", "越权新增\n");
     const r = syncOnce(cfg, { logger });
-    expect(r.mirror).toBe(true);
-    expect(r.committed).toBe(false);
-    expect(r.pushed).toBe(false);
     expect(r.discardedFiles.sort()).toEqual(["docs/guide.md", "rogue.md"]);
     expect(read(dir, "docs/guide.md")).toContain("feishu_url");
     expect(fs.existsSync(path.join(dir, "rogue.md"))).toBe(false);
@@ -50,7 +47,6 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
 
     // 第一轮：完成首次上锁（0o644 → 0o444），期间确实会发生 chmod。
     const r1 = syncOnce(cfg, { logger });
-    expect(r1.mirror).toBe(true);
 
     const statOf = () => {
       const st = fs.statSync(mdFile);
@@ -60,7 +56,6 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
 
     // 第二轮：工作区干净、远端无新提交 —— 应当零 chmod。
     const r2 = syncOnce(cfg, { logger });
-    expect(r2.mirror).toBe(true);
     expect(r2.discardedFiles).toEqual([]);
 
     const after = statOf();
@@ -71,7 +66,6 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
     const { root, dir, cfg, logger } = setup();
     pushMirrorUpdate(root, "docs/new.md", "---\nfeishu_url: u\n---\n新文档\n");
     const r = syncOnce(cfg, { logger });
-    expect(r.mirror).toBe(true);
     expect(r.merged).toBe(true);
     expect(read(dir, "docs/new.md")).toContain("新文档");
     const mode = fs.statSync(path.join(dir, "docs", "new.md")).mode & 0o777;
@@ -86,8 +80,6 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
     g(dir, "add", "-A");
     g(dir, "commit", "-m", "手动越权提交");
     const r = syncOnce(cfg, { logger });
-    expect(r.mirror).toBe(true);
-    expect(r.pushed).toBe(false);
     expect(read(dir, "docs/guide.md")).toContain("feishu_url");
     // 本地 HEAD 已与远端一致
     const local = g(dir, "rev-parse", "HEAD").stdout.trim();
@@ -95,25 +87,21 @@ describe("mirrorSyncOnce（经 syncOnce 自动分流）", () => {
     expect(local).toBe(remote);
   });
 
-  it("暂停标记仍然生效", () => {
-    const { dir, cfg, logger } = setup();
-    write(dir, ".knowbase-pause", "");
-    const r = syncOnce(cfg, { logger });
-    expect(r.paused).toBe(true);
-    expect(r.mirror).toBe(true);
-  });
-
-  it("经典仓库（无清单）不受影响：仍走上行路径", () => {
+  it("非镜像仓库：原地不动，绝不 reset（升级不能变成数据丢失）", () => {
     const root = tmpDir("classic");
     const bare = makeOrigin(root);
     const dir = path.join(root, "member");
     cloneWorkdir(bare, dir);
-    write(dir, "note.md", "本地新增\n");
+    write(dir, "note.md", "本地新增、尚未推送\n");
+    const before = read(dir, "note.md");
     const r = syncOnce(mkConfig(bare, dir), {
       logger: new Logger(path.join(root, "t.log")),
     });
-    expect(r.mirror).toBe(false);
-    expect(r.committed).toBe(true);
-    expect(r.pushed).toBe(true);
+    expect(r.notMirror).toBe(true);
+    expect(r.error).toContain(".knowbase-mirror.json");
+    expect(r.merged).toBe(false);
+    expect(r.discardedFiles).toEqual([]);
+    // 关键：本地内容必须原样还在
+    expect(read(dir, "note.md")).toBe(before);
   });
 });

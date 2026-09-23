@@ -3,9 +3,6 @@ import path from "node:path";
 import {
   Config,
   Logger,
-  isPaused,
-  safeHostname,
-  timestamp,
   writeDaemonState,
   readDaemonState,
   pidAlive,
@@ -15,38 +12,22 @@ import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
 import { syncSkills, summarizeByTool } from "./skills-sync.js";
-import { PushGate } from "./push-gate.js";
 import { isMirrorMode, setMirrorLock, discardLocalChanges } from "./mirror.js";
 
 export interface SyncDeps {
   logger: Logger;
-  /** 可注入的时间源，便于测试确定性生成冲突副本时间戳。 */
-  now?: () => Date;
-  /** 可注入主机名（默认取 safeHostname）。 */
-  hostname?: string;
-  /**
-   * push 熔断器（守护进程长驻持有）。不传即不熔断——前台单次同步走这条路，
-   * 用户主动跑 `knowbase sync` 就是想立刻知道现在通不通。
-   */
-  pushGate?: PushGate;
 }
 
 export interface SyncResult {
-  paused: boolean;
-  committed: boolean;
+  /** 本轮从远端跟进了新内容（reset 到上游）。 */
   merged: boolean;
-  pushed: boolean;
-  pushRejected: boolean;
-  /** push 因权限/凭证被拒（重试无意义）。 */
-  pushDenied: boolean;
-  /** 因熔断跳过了本轮 push。 */
-  pushSkipped: boolean;
-  /** 本轮生成的冲突副本文件（相对路径）。 */
-  conflictCopies: string[];
-  /** 本轮走了镜像模式路径（仓库内存在 .knowbase-mirror.json）。 */
-  mirror: boolean;
-  /** 镜像模式下本轮被丢弃的本地改动（相对路径）。 */
+  /** 本轮被丢弃的本地改动（相对路径）。 */
   discardedFiles: string[];
+  /**
+   * 仓库不是飞书镜像（缺 .knowbase-mirror.json），本轮什么都没做。
+   * 见 syncOnce 的说明：这种仓库**必须**原地不动。
+   */
+  notMirror: boolean;
   /** 网络/致命步骤出错时的说明；引擎本身不抛异常。 */
   error?: string;
 }
@@ -54,80 +35,7 @@ export interface SyncResult {
 const REMOTE = "origin";
 
 function emptyResult(): SyncResult {
-  return {
-    paused: false,
-    committed: false,
-    merged: false,
-    pushed: false,
-    pushRejected: false,
-    pushDenied: false,
-    pushSkipped: false,
-    conflictCopies: [],
-    mirror: false,
-    discardedFiles: [],
-  };
-}
-
-/** 生成自动提交信息：auto[host]: 文件列表（超过 3 个则计数）。 */
-export function commitMessage(host: string, files: string[]): string {
-  if (files.length === 0) return `auto[${host}]: 同步`;
-  if (files.length <= 3) {
-    return `auto[${host}]: ${files.join(", ")}`;
-  }
-  return `auto[${host}]: ${files.length} 个文件变更`;
-}
-
-/** 为冲突文件构造副本路径：原名.conflict-host-ts.ext（避免与已存在副本冲突）。 */
-function conflictCopyPath(
-  dir: string,
-  file: string,
-  host: string,
-  ts: string
-): string {
-  const ext = path.extname(file);
-  const base = file.slice(0, file.length - ext.length);
-  let candidate = `${base}.conflict-${host}-${ts}${ext}`;
-  let n = 1;
-  while (fs.existsSync(path.join(dir, candidate))) {
-    candidate = `${base}.conflict-${host}-${ts}-${n}${ext}`;
-    n++;
-  }
-  return candidate;
-}
-
-/**
- * 处理 merge 后的非 md 冲突（union 覆盖不到的情况）——冲突副本兜底：
- * 本地版本另存副本，原文件采用远端版本，全部 add。返回副本相对路径列表。
- */
-function handleConflicts(dir: string, deps: SyncDeps): string[] {
-  const host = deps.hostname ?? safeHostname();
-  const ts = timestamp(deps.now ? deps.now() : new Date());
-  const copies: string[] = [];
-
-  for (const file of git.unmergedFiles(dir)) {
-    // 1. 保存本地版本（stage 2）为冲突副本；删改冲突时可能不存在，容错跳过
-    const local = git.showStage2(dir, file);
-    if (local != null) {
-      const copyRel = conflictCopyPath(dir, file, host, ts);
-      const full = path.join(dir, copyRel);
-      fs.mkdirSync(path.dirname(full), { recursive: true });
-      fs.writeFileSync(full, local);
-      git.addPath(dir, copyRel);
-      copies.push(copyRel);
-    }
-    // 2. 原文件采用远端版本；远端已删除则移除
-    const theirs = git.checkoutTheirs(dir, file);
-    if (git.ok(theirs)) {
-      git.addPath(dir, file);
-    } else {
-      const rmRes = git.rm(dir, file);
-      if (!git.ok(rmRes)) {
-        // 兜底：无论如何把该路径的冲突状态清掉，避免阻塞
-        git.addPath(dir, file);
-      }
-    }
-  }
-  return copies;
+  return { merged: false, discardedFiles: [], notMirror: false };
 }
 
 /** stale 判定阈值：正常 git 操作绝不会持锁这么久。 */
@@ -151,133 +59,36 @@ function clearStaleLock(dir: string, logger: Logger): void {
 }
 
 /**
- * 执行一次完整同步周期（product.md §2.2）。永不抛异常：
- * 网络失败记录到 result.error，交由下一周期重试。
+ * 执行一次完整同步周期。永不抛异常：网络失败记录到 result.error，交由下一周期重试。
+ *
+ * **非镜像仓库一律原地不动**。1.0.0 废弃了经典模式（本地可写、双向同步），
+ * 同步路径只剩单向下行，而下行的手段是 `git reset --hard`——把一个经典仓库
+ * 按镜像处理，等于把成员尚未推送的本地内容全部抹掉。宁可什么都不做并每轮
+ * 报一条明确的错，也不能让升级动作本身变成数据丢失事故。
  */
 export function syncOnce(cfg: Config, deps: SyncDeps): SyncResult {
-  if (isMirrorMode(cfg.dir)) return mirrorSyncOnce(cfg, deps);
-
-  const { logger } = deps;
-  const result = emptyResult();
-  const dir = cfg.dir;
-  const host = deps.hostname ?? safeHostname();
-
-  // 1. 暂停检查
-  if (isPaused(dir)) {
-    result.paused = true;
-    logger.log("已暂停（存在 .knowbase-pause），跳过本轮");
+  if (!isMirrorMode(cfg.dir)) {
+    const result = emptyResult();
+    result.notMirror = true;
+    result.error =
+      "该仓库不是飞书镜像（缺 .knowbase-mirror.json），已跳过同步。" +
+      "1.0.0 起只支持飞书镜像模式；经典双向同步仓库请留在 0.9.x，或改用 exporter 产出镜像仓库。";
+    deps.logger.log(result.error);
     return result;
   }
-
-  try {
-    // 1.5 自愈残留锁
-    clearStaleLock(dir, logger);
-
-    // 2. 本地有改动 → add -A → commit（先提交，保证 merge 面对干净工作区）
-    if (git.hasChanges(dir)) {
-      const files = git.changedFiles(dir);
-      git.addAll(dir);
-      const c = git.commit(dir, commitMessage(host, files));
-      if (git.ok(c)) {
-        result.committed = true;
-        logger.log(`已提交本地改动：${files.join(", ")}`);
-      } else if (!/nothing to commit/i.test(c.stdout + c.stderr)) {
-        logger.log(`commit 异常：${(c.stderr || c.stdout).trim()}`);
-      }
-    }
-
-    // 3. fetch
-    const f = git.fetch(dir, REMOTE);
-    if (!git.ok(f)) {
-      result.error = `fetch 失败：${f.stderr.trim() || f.stdout.trim()}`;
-      logger.log(result.error + "（下一周期重试）");
-      return result;
-    }
-
-    const upstream = `${REMOTE}/${cfg.branch}`;
-
-    // 4. 本地落后 → merge
-    if (git.upstreamExists(dir, upstream) && git.behindCount(dir, upstream) > 0) {
-      const m = git.merge(dir, upstream);
-      if (git.ok(m)) {
-        result.merged = true;
-      } else {
-        // union 已自动合并 md；到这里的都是非 md 冲突 → 冲突副本兜底
-        const copies = handleConflicts(dir, deps);
-        result.conflictCopies = copies;
-        const done = git.commitNoEdit(dir);
-        if (!git.ok(done)) {
-          // 极端情况下仍有残留，记录但不阻塞
-          logger.log(`合并提交异常：${(done.stderr || done.stdout).trim()}`);
-        }
-        result.merged = true;
-        if (copies.length > 0) {
-          logger.log(`生成冲突副本 ${copies.length} 个：${copies.join(", ")}`);
-        }
-      }
-    }
-
-    // 5. 本地领先 → push（被拒静默留待下轮）
-    // upstream 不存在（远端尚无该分支）时，只要本轮有提交就尝试建立分支。
-    const shouldPush = git.upstreamExists(dir, upstream)
-      ? git.aheadCount(dir, upstream) > 0
-      : result.committed || result.merged;
-    if (shouldPush) {
-      const gate = deps.pushGate;
-      const nowMs = (deps.now ? deps.now() : new Date()).getTime();
-      if (gate && !gate.shouldAttempt(nowMs)) {
-        // 熔断中且未到探测窗口：静默跳过。这里刻意不写日志——
-        // 每周期一条错误日志本身就是本次要修的问题之一。
-        result.pushSkipped = true;
-      } else {
-        const p = git.push(dir, REMOTE, cfg.branch);
-        result.pushed = p.ok;
-        result.pushRejected = p.rejected;
-        result.pushDenied = p.denied;
-        const reason = p.ok ? "" : git.pushFailureReason(p.result);
-        const flip = gate?.record(p, reason, nowMs) ?? "unchanged";
-        if (p.ok) {
-          logger.log(flip === "recovered" ? "push 权限已恢复，继续推送" : "已推送到远端");
-        } else if (p.denied) {
-          result.error = `push 无权限：${reason}`;
-          if (flip === "blocked") {
-            logger.log(`push 无权限，已暂停推送（每 5 分钟自动重试一次）：${reason}`);
-          } else if (!gate) {
-            logger.log(`push 无权限：${reason}`);
-          }
-        } else if (p.rejected) {
-          logger.log("push 被拒（并发竞争），下一周期先合并再推");
-        } else {
-          result.error = `push 失败：${(p.result.stderr || p.result.stdout).trim()}`;
-          logger.log(result.error + "（下一周期重试）");
-        }
-      }
-    }
-  } catch (e) {
-    result.error = e instanceof Error ? e.message : String(e);
-    logger.log(`同步周期异常：${result.error}`);
-  }
-
-  return result;
+  return mirrorSyncOnce(cfg, deps);
 }
 
 /**
  * 镜像模式的同步周期（spec §4.2/§4.3）：严格单向下行。
- * 永不 commit、永不 push、不触碰 pushGate；本地一切改动直接丢弃（§4.3，
+ * 永不 commit、永不 push；本地一切改动直接丢弃（§4.3，
  * 定稿决策：不留底，改动入口只有飞书）；远端永远是对的，本地历史被人
  * 手动动过就 reset --hard。与 syncOnce 同样 never throw。
  */
 export function mirrorSyncOnce(cfg: Config, deps: SyncDeps): SyncResult {
   const { logger } = deps;
   const result = emptyResult();
-  result.mirror = true;
   const dir = cfg.dir;
-
-  if (isPaused(dir)) {
-    result.paused = true;
-    logger.log("已暂停（存在 .knowbase-pause），跳过本轮");
-    return result;
-  }
 
   try {
     clearStaleLock(dir, logger);
@@ -445,10 +256,10 @@ export function refreshOrgSkills(
 
 /**
  * 守护进程主体：混合调度。
- * - 上行加速：文件监听 + 防抖（静默 quietMs 触发，maxWaitMs 封顶防饿死），
- *   本地一有改动几秒内即推送，缩小多设备并发编辑的冲突窗口。
- * - 下行兜底：固定 interval 轮询 fetch 远端改动（Git 无推送通知，轮询不可省），
- *   同时兜住监听失效的情况——最坏退化为纯轮询，不会更糟。
+ * - 下行轮询：固定 interval fetch 远端改动（Git 无推送通知，轮询不可省），这是
+ *   镜像跟进飞书内容的主路径。
+ * - 文件监听 + 防抖：镜像目录是只读的，监听的意义不再是加速上行，而是本地一旦
+ *   被改（绕过只读位、或某个工具写入）立刻触发一轮丢弃，把偏离窗口压到几秒。
  */
 export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const { logger } = deps;
@@ -466,31 +277,22 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const state: DaemonState = { pid: process.pid, startedAt };
   writeDaemonState(state);
 
-  // 熔断器长驻于守护进程内存：跨周期保持状态，随进程退出而清空。
-  const gate = deps.pushGate ?? new PushGate();
-  const cycleDeps: SyncDeps = { ...deps, pushGate: gate };
-
   // syncOnce 是同步阻塞的，事件循环保证不会重入。
   // 不设「同步后屏蔽窗」：屏蔽会丢掉紧跟同步之后的用户编辑（只能干等下轮轮询）。
   // 同步自身写盘（merge 落盘/冲突副本）最多引发一次空跑同步——空跑无改动、
   // 只动 .git（已过滤），不会形成风暴，天然收敛。
   const runCycle = (): void => {
     try {
-      const r = syncOnce(cfg, cycleDeps);
+      const r = syncOnce(cfg, deps);
       state.lastCycleAt = new Date().toISOString();
-      state.paused = r.paused;
       state.lastError = r.error;
-      if (!r.error && !r.paused) {
+      if (!r.error) {
         state.lastOkCycleAt = state.lastCycleAt;
-        if (r.committed || r.merged || r.pushed) {
-          state.lastSyncOkAt = state.lastCycleAt;
-        }
+        if (r.merged) state.lastSyncOkAt = state.lastCycleAt;
       }
-      state.mirror = r.mirror || undefined;
       if (r.discardedFiles.length > 0) {
         state.lastDiscard = { at: state.lastCycleAt!, files: r.discardedFiles };
       }
-      state.pushBlocked = gate.snapshot();
       writeDaemonState(state);
     } catch (e) {
       state.lastError = e instanceof Error ? e.message : String(e);

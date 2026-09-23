@@ -5,8 +5,6 @@ import updateNotifier from "update-notifier";
 import { cmdInit, InitOptions } from "./commands/init.js";
 import { cmdStatus } from "./commands/status.js";
 import { cmdSync } from "./commands/sync.js";
-import { cmdPause } from "./commands/pause.js";
-import { cmdResume } from "./commands/resume.js";
 import { cmdUninstall } from "./commands/uninstall.js";
 import { cmdDaemon } from "./commands/daemon.js";
 import { cmdExporter } from "./commands/exporter.js";
@@ -46,23 +44,15 @@ program
 
 program
   .command("status")
-  .description("一屏查看健康度：守护进程 / 上次同步 / 未推送改动 / 冲突副本 / 远端连通性")
+  .description("一屏查看健康度：守护进程 / 上次同步 / 本地改动丢弃 / 远端连通性")
   .action(() => run(cmdStatus));
 
 program
   .command("sync")
-  .description("立即触发一次同步周期（前台输出过程，用于排查和急用）")
+  .description("立即从飞书镜像拉取一次（前台输出过程，不必等轮询）")
   .action(() => run(cmdSync));
 
-program
-  .command("pause")
-  .description("暂停自动同步（大范围改动期间用，避免半成品被提交）")
-  .action(() => run(cmdPause));
 
-program
-  .command("resume")
-  .description("恢复自动同步")
-  .action(() => run(cmdResume));
 
 program
   .command("uninstall")

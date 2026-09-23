@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
-import { isMirrorMode } from "./mirror.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -12,14 +11,6 @@ import { isMirrorMode } from "./mirror.js";
 
 export const BLOCK_START = "<!-- KNOWBASE:START （由 knowbase 自动管理，勿手动编辑本区块） -->";
 export const BLOCK_END = "<!-- KNOWBASE:END -->";
-
-/**
- * 镜像模式注入区块所需信息（spec §5）。
- * 曾有 inboxUrl（「Agent 沉淀」目录）字段，已按产品决策移除：AI 与人的编辑平权，
- * 新增文档由 agent 参照目录树自行判断归属，不设专属 AI 目录。保留空接口以便
- * 未来携带其他仓库级信息。
- */
-export interface MirrorBlockInfo {}
 
 export interface AgentTarget {
   /** 展示名。 */
@@ -184,13 +175,8 @@ export function readKbTree(dir: string): KbTree {
 /**
  * 生成托管区块正文（含起止标记），内嵌本机知识库目录与自动生成的目录树。
  * tree 传 null / undefined（或纯空白）时输出回退文案（知识库暂无文件的情况）。
- * mirror 传 null / undefined 时输出经典文案；非 null 时切换为镜像模式文案（spec §5）。
  */
-export function buildBlock(
-  dir: string,
-  tree?: string | null,
-  mirror?: MirrorBlockInfo | null
-): string {
+export function buildBlock(dir: string, tree?: string | null): string {
   // 纯空白的树（知识库确实没有文件）也走回退文案：否则会输出一个有标题没正文的
   // 段落，且与 status 「暂无文件」的口径打架。
   const hasTree = tree != null && tree.trim() !== "";
@@ -200,8 +186,7 @@ export function buildBlock(
 ${tree}`
     : `知识库暂无文件，需要时直接 grep 全库。`;
 
-  if (mirror) {
-    return `${BLOCK_START}
+  return `${BLOCK_START}
 ## 组织知识库（knowbase · 飞书镜像）
 
 \`${dir}\` —— 飞书知识库的**只读本地镜像**，全组织共享，后台自动从飞书单向同步。
@@ -217,27 +202,6 @@ ${tree}`
 - 修改会在几分钟内自动回流到本目录；同一会话内如需引用刚写入的内容，以写进飞书的版本为准。
 
 **团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
-
-**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题），先在树中定位路径再读取。树不是完整清单——文件多的目录只列头尾各 5 篇、中间折叠成「另有 N 篇未列出」；**树里找不到不等于库里没有**，遇到折叠标记或没把握时一律 grep 全库确认。
-
-${treeSection}
-${BLOCK_END}`;
-  }
-
-  return `${BLOCK_START}
-## 组织知识库（knowbase）
-
-\`${dir}\` —— **全组织共享**，后台自动与 Git 远端双向同步，你写入的内容会同步给所有成员。
-
-**读**：需要业务背景、历史决策、架构约定、环境配置、踩坑记录等组织隐性知识时，先 grep / 读该目录下的 Markdown。
-
-**写**：只写对其他成员有复用价值的组织级知识；拿不准先询问用户，不要擅自写入。
-- ✅ 业务规则与背景、技术决策及其原因、公共环境/服务配置、通用踩坑与解决方案、跨项目约定。
-- ❌ 个人偏好与习惯、个人待办/日程/草稿、仅与本机或当前个人任务相关的内容、个人私人信息——放本机个人配置或个人笔记，不进知识库。
-
-**沉淀可执行流程**：知识库不只放散文。把「怎么做某件事」的步骤沉淀成 skill —— 写到 \`${dir}/${SKILLS_SUBDIR}/<name>/SKILL.md\`（需含 \`name\` / \`description\` 的 YAML frontmatter），knowbase 会自动分发到全团队每个人的 Claude Code。本机以 \`${ORG_PREFIX}<name>\` 出现；skill 之间互相引用时用带前缀的全名。
-
-**操作**：直接读写 Markdown，保存即同步，无需 git add/commit/push。大范围改动前 \`knowbase pause\`，完成后 \`knowbase resume\`。
 
 **导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题），先在树中定位路径再读取。树不是完整清单——文件多的目录只列头尾各 5 篇、中间折叠成「另有 N 篇未列出」；**树里找不到不等于库里没有**，遇到折叠标记或没把握时一律 grep 全库确认。
 
@@ -369,9 +333,7 @@ export function syncAgentConfig(
   home: string = os.homedir(),
   opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
-  // 镜像仓库自动切换文案（spec §5）——见 isMirrorMode 的注释
-  const mirror = isMirrorMode(dir) ? {} : null;
-  const block = buildBlock(dir, readKbTree(dir).text, mirror);
+  const block = buildBlock(dir, readKbTree(dir).text);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);

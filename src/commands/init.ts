@@ -4,7 +4,6 @@ import {
   Config,
   DEFAULT_BRANCH,
   DEFAULT_INTERVAL,
-  PAUSE_MARKER,
   defaultDir,
   saveConfig,
   Logger,
@@ -114,28 +113,25 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("  ✓ clone 完成");
   }
 
-  // 镜像仓库（存在 .knowbase-mirror.json）对成员侧全程只读（spec §4/§6）：
-  // 经典模式「本地是可写副本，需要种入合并规则、能 commit/push」这套假设
-  // 不成立，clone 后立即判断、就地分流，收窄的是后面这一大段的适用范围，
-  // 而不是靠散落各处的 if 判断。这里顺手做首次上锁，收窄「clone 完成到
-  // daemon 首个周期上锁」之间的无锁窗口。
-  const mirrorMode = isMirrorMode(dir);
-  if (mirrorMode) {
-    setMirrorLock(dir, true);
-    console.log("");
-    console.log("• 本目录是飞书知识库的只读镜像（真相源在飞书）：");
-    console.log("  修改请走各文件头部 frontmatter 的 feishu_url，用飞书文档工具编辑对应文档。");
-    console.log("  agent 写入依赖本机已配置的 lark 工具链（lark-doc / lark-wiki）；");
-    console.log("  未配置则 agent 只读，写入建议由人工在飞书完成（详见 spec §6）。");
-    console.log("");
+  // 1.0.0 起 knowbase 只服务飞书镜像仓库：本地全程只读，同步严格单向下行。
+  // 非镜像仓库在这里硬失败而不是降级接入——接入后守护进程每轮都会拒绝同步
+  // （见 syncOnce 的守卫），与其让人装完才发现不能用，不如当场说清楚。
+  if (!isMirrorMode(dir)) {
+    console.error("");
+    console.error("✗ 该仓库不是飞书镜像（仓库根缺少 .knowbase-mirror.json），无法接入。");
+    console.error("  1.0.0 起只支持飞书镜像模式：知识的唯一真相源是飞书，本地是只读镜像。");
+    console.error("  用 `knowbase exporter` 从飞书知识空间导出镜像仓库，再用它接入；");
+    console.error("  仍需要经典双向同步的，请留在 0.9.x。");
+    return 1;
   }
-
-  // git 身份提示（缺失时同步引擎会用临时身份兜底，不阻塞）——镜像模式永不
-  // commit，这条提示无意义，跳过。
-  if (!mirrorMode && !git.hasIdentity(dir)) {
-    console.warn("⚠ 未配置 git user.name/email，自动提交将使用临时身份 knowbase[主机名]。");
-    console.warn('  建议配置：git config --global user.name "你的名字" && git config --global user.email "you@example.com"');
-  }
+  // 首次上锁，收窄「clone 完成到 daemon 首个周期上锁」之间的无锁窗口。
+  setMirrorLock(dir, true);
+  console.log("");
+  console.log("• 本目录是飞书知识库的只读镜像（真相源在飞书）：");
+  console.log("  修改请走各文件头部 frontmatter 的 feishu_url，用飞书文档工具编辑对应文档。");
+  console.log("  agent 写入依赖本机已配置的 lark 工具链（lark-doc / lark-wiki）；");
+  console.log("  未配置则 agent 只读，写入建议由人工在飞书完成（详见 spec §6）。");
+  console.log("");
 
   // 切到目标分支。空仓库（HEAD 未诞生）跳过——首次推送时由 HEAD:<branch> 建立；
   // 非空仓库切换失败则硬失败：沿用错误分支会把其他分支内容推成 <branch>，语义混乱。
@@ -146,64 +142,6 @@ export function cmdInit(url: string, opts: InitOptions): number {
       console.error(`✗ 无法切换到分支 ${branch}：${co.stderr.trim()}`);
       console.error(`  远端若使用其他分支名，请用 --branch 指定（当前本地分支：${git.currentBranch(dir)}）。`);
       return 1;
-    }
-  }
-
-  // 2.5 写权限预检。ls-remote 只验证读权限——只读成员会一路成功接入，
-  // 然后每个周期默默推不上去。这里提前把事实说清楚，但不阻断：
-  // 只读同样是合法用法（能读到团队知识就已经有价值）。镜像仓库永不 push，
-  // 预检没有意义，跳过。
-  //
-  // 已知局限：pushDryRun 基于 `git push --dry-run`，只能反映传输层鉴权
-  // （如 GitHub/GitLab 在 ref 协商之前就返回的 401/403）；服务端 hook 或
-  // 保护分支一类需要真实提交命令才会触发的拒绝，dry-run 探测不到，要等
-  // 真实 push 才会暴露，那时由守护进程内置的熔断器兜底（见 push-gate）。
-  let readOnly = false;
-  if (!mirrorMode && headBorn) {
-    const dry = git.pushDryRun(dir, "origin", branch);
-    readOnly = dry.denied;
-    if (readOnly) {
-      console.warn("");
-      console.warn("⚠ 你对该仓库没有 push 权限，knowbase 将以只读模式运行：");
-      console.warn("  能拉到团队的更新，本地改动只提交在本机、不会同步出去。");
-      console.warn(`  原因：${git.pushFailureReason(dry.result)}`);
-      console.warn("  需要写权限请联系仓库管理员，补上后自动恢复，无需重新 init。");
-      console.warn("");
-    }
-  }
-
-  // 3. 种入 union 合并规则与忽略规则（无则提交推送）——镜像仓库的合并规则
-  // 与忽略规则由 exporter 侧维护，成员不 commit，跳过种入。
-  if (mirrorMode) {
-    console.log("• 镜像仓库跳过种入 union 合并规则 / 忽略规则（只读，由飞书侧维护）");
-  } else {
-    let seeded = false;
-    seeded = ensureLine(path.join(dir, ".gitattributes"), "*.md merge=union") || seeded;
-    seeded = ensureLine(path.join(dir, ".gitignore"), PAUSE_MARKER) || seeded;
-    if (seeded) {
-      console.log("• 种入 .gitattributes(union) / .gitignore 规则");
-      git.addAll(dir);
-      const c = git.commit(dir, "chore(knowbase): 种入 union 合并规则与忽略规则");
-      if (git.ok(c)) {
-        if (readOnly) {
-          console.log("  （只读模式：规则已本地提交，暂不推送）");
-        } else {
-          const p = git.push(dir, "origin", branch);
-          if (!p.ok) {
-            console.warn(
-              p.denied
-                ? "⚠ 规则已本地提交，但没有 push 权限——将以只读模式运行，补上写权限后自动恢复。"
-                : "⚠ 规则已本地提交，但推送未成功（守护进程会自动重试）。"
-            );
-          }
-        }
-      } else {
-        console.warn(
-          `⚠ 规则文件已写入但提交失败（可能未配置 git user.name/email）：${(c.stderr || c.stdout).trim()}`
-        );
-      }
-    } else {
-      console.log("• 仓库已含 union / 忽略规则");
     }
   }
 

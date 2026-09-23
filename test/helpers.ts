@@ -116,12 +116,6 @@ export function write(dir: string, rel: string, content: string): void {
   fs.writeFileSync(full, content);
 }
 
-export function listConflictCopies(dir: string): string[] {
-  return fs
-    .readdirSync(dir)
-    .filter((f) => f.includes(".conflict-"));
-}
-
 /**
  * 给 bare 远端装一个 pre-receive 钩子，真实模拟「有读权限、无写权限」。
  * git 会给钩子的 stderr 加上 remote: 前缀，输出形态与 GitLab 线上一致。

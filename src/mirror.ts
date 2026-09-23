@@ -1,7 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import * as git from "./git.js";
-import { PAUSE_MARKER } from "./config.js";
 
 /**
  * 飞书镜像模式（spec §4）：仓库根存在本清单文件即为镜像仓库。
@@ -146,12 +145,12 @@ export function discardLocalChanges(dir: string): DiscardResult {
   if (!git.ok(r)) {
     return { files: [], error: `reset 失败：${(r.stderr || r.stdout).trim()}` };
   }
-  const c = git.cleanUntracked(dir, [PAUSE_MARKER]);
+  const c = git.cleanUntracked(dir, []);
   if (!git.ok(c)) {
     return { files: [], error: `clean 失败：${(c.stderr || c.stdout).trim()}` };
   }
   // 过滤掉暂停标记，避免调用方误报其被丢弃（实际被 -e 排除保留）
-  return { files: expandedFiles.filter((f) => f !== PAUSE_MARKER) };
+  return { files: expandedFiles };
 }
 
 /** exporter 停摆判定阈值（spec §4.4）：导出周期 2 分钟，30 分钟未更新即异常。 */

@@ -9,6 +9,7 @@ import { buildBlock } from "../src/agent-config.js";
 import {
   tmpDir,
   makeOrigin,
+  makeMirrorOrigin,
   cloneWorkdir,
   mkConfig,
   write,
@@ -29,75 +30,38 @@ afterEach(() => {
   fs.rmSync(root, { recursive: true, force: true });
 });
 
-const deps = () => ({ logger, hostname: "hostX" });
-
-describe("P1: git 身份兜底", () => {
-  it("完全无身份配置的机器上，commit/merge 仍然成功（临时身份）", () => {
-    const A = path.join(root, "A");
-    cloneWorkdir(bare, A);
-    // 抹掉本仓库与全局/系统配置的身份来源
-    g(A, "config", "--unset-all", "user.name");
-    g(A, "config", "--unset-all", "user.email");
-    const saved = {
-      GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
-      GIT_CONFIG_SYSTEM: process.env.GIT_CONFIG_SYSTEM,
-    };
-    process.env.GIT_CONFIG_GLOBAL = "/dev/null";
-    process.env.GIT_CONFIG_SYSTEM = "/dev/null";
-    try {
-      write(A, "note.md", "no identity\n");
-      const r = syncOnce(mkConfig(bare, A), deps());
-      expect(r.committed).toBe(true);
-      expect(r.pushed).toBe(true);
-      // 提交作者是临时身份
-      const who = spawnSync("git", ["log", "-1", "--format=%an <%ae>"], {
-        cwd: A,
-        encoding: "utf8",
-        env: { ...process.env },
-      }).stdout.trim();
-      expect(who).toContain("knowbase");
-    } finally {
-      if (saved.GIT_CONFIG_GLOBAL === undefined) delete process.env.GIT_CONFIG_GLOBAL;
-      else process.env.GIT_CONFIG_GLOBAL = saved.GIT_CONFIG_GLOBAL;
-      if (saved.GIT_CONFIG_SYSTEM === undefined) delete process.env.GIT_CONFIG_SYSTEM;
-      else process.env.GIT_CONFIG_SYSTEM = saved.GIT_CONFIG_SYSTEM;
-    }
-  });
-
-  it("已配置身份的机器不受影响（不覆盖用户身份）", () => {
-    const A = path.join(root, "A");
-    cloneWorkdir(bare, A); // helpers 已设置 test/test@example.com
-    write(A, "note.md", "with identity\n");
-    const r = syncOnce(mkConfig(bare, A), deps());
-    expect(r.committed).toBe(true);
-    const who = g(A, "log", "-1", "--format=%an <%ae>").stdout.trim();
-    expect(who).toBe("test <test@example.com>");
-  });
-});
+const deps = () => ({ logger });
 
 describe("P2: stale index.lock 自愈", () => {
-  it("超过 10 分钟的残留锁被自动清除，同步继续", () => {
+  // 必须用镜像仓库：syncOnce 对非镜像仓库在守卫处就返回了，根本走不到清锁那步，
+  // 用经典仓库写出来的会是恒真断言。
+  const mirrorClone = (): { bare: string; A: string } => {
+    const mbare = makeMirrorOrigin(root);
     const A = path.join(root, "A");
-    cloneWorkdir(bare, A);
+    cloneWorkdir(mbare, A);
+    return { bare: mbare, A };
+  };
+
+  it("超过 10 分钟的残留锁被自动清除，同步继续", () => {
+    const { bare: mbare, A } = mirrorClone();
     const lock = path.join(A, ".git", "index.lock");
     fs.writeFileSync(lock, "");
     const old = new Date(Date.now() - 11 * 60 * 1000);
     fs.utimesSync(lock, old, old);
 
-    write(A, "note.md", "after lock\n");
-    const r = syncOnce(mkConfig(bare, A), deps());
+    write(A, "rogue.md", "越权新增\n");
+    const r = syncOnce(mkConfig(mbare, A), deps());
     expect(fs.existsSync(lock)).toBe(false);
-    expect(r.committed).toBe(true);
-    expect(r.pushed).toBe(true);
+    expect(r.error).toBeUndefined();
+    expect(r.discardedFiles).toEqual(["rogue.md"]);
   });
 
   it("新鲜的锁不动（可能是并发的正常 git 操作）", () => {
-    const A = path.join(root, "A");
-    cloneWorkdir(bare, A);
+    const { bare: mbare, A } = mirrorClone();
     const lock = path.join(A, ".git", "index.lock");
     fs.writeFileSync(lock, "");
 
-    syncOnce(mkConfig(bare, A), deps());
+    syncOnce(mkConfig(mbare, A), deps());
     expect(fs.existsSync(lock)).toBe(true);
     fs.rmSync(lock);
   });

@@ -1,6 +1,6 @@
 {
   "name": "knowbase",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "AI 时代的团队知识库同步工具：安装即忘。经典模式本地文件夹 ⇋ Git 远端自动双向同步；飞书镜像模式以飞书知识库为唯一真相源，exporter 导出为 Git 镜像、成员本地只读，agent 读本地 grep、写走飞书。",
   "keywords": [
     "knowledge-base",

@@ -101,7 +101,7 @@ beforeEach(() => {
   root = tmpDir("cli");
   home = path.join(root, "home");
   fs.mkdirSync(home, { recursive: true });
-  bare = makeOrigin(root);
+  bare = makeMirrorOrigin(root);
 });
 
 afterEach(() => {
@@ -123,7 +123,7 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(h.out).not.toContain("daemon");
   });
 
-  it("init → 种入规则、写配置、跳过自启", () => {
+  it("init → 写配置、跳过自启、不产生新 commit", () => {
     const kb = path.join(root, "kb");
     const r = knowbase(["init", bare, "--dir", kb]);
     expect(r.code).toBe(0);
@@ -136,13 +136,8 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(cfg.repoUrl).toBe(bare);
     expect(cfg.dir).toBe(kb);
 
-    // union 规则
-    expect(fs.readFileSync(path.join(kb, ".gitattributes"), "utf8")).toContain(
-      "*.md merge=union"
-    );
-    expect(fs.readFileSync(path.join(kb, ".gitignore"), "utf8")).toContain(
-      ".knowbase-pause"
-    );
+    // 1.0.0：不再种入 union / 忽略规则（镜像仓库的规则由 exporter 侧维护）
+    expect(fs.existsSync(path.join(kb, ".gitattributes"))).toBe(false);
 
     // 默认自动配置 Claude Code / Codex 全局提示词
     const claude = path.join(home, ".claude", "CLAUDE.md");
@@ -150,6 +145,17 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.readFileSync(claude, "utf8")).toContain(kb);
     expect(fs.readFileSync(codex, "utf8")).toContain(kb);
     expect(r.out).toContain("全局提示词");
+  });
+
+  it("init 拒绝非镜像仓库：明确报错、不 clone 成可用状态", () => {
+    // 1.0.0 废弃经典模式。同步手段是 reset --hard，把可写仓库当镜像接入
+    // 等于给数据丢失开口子——必须当场硬失败，而不是降级接入。
+    const classicBare = makeOrigin(root);
+    const kb = path.join(root, "kb-classic");
+    const r = knowbase(["init", classicBare, "--dir", kb]);
+    expect(r.code).toBe(1);
+    expect(r.out + r.err).toContain(".knowbase-mirror.json");
+    expect(fs.existsSync(path.join(home, ".config", "knowbase", "config.json"))).toBe(false);
   });
 
   it("init 对镜像仓库只读接入：跳过种入规则、不产生新 commit、打印镜像说明", () => {
@@ -245,36 +251,7 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(true);
   });
 
-  it("init → 写文件 → sync 推送 → 另一 clone 可见", () => {
-    const kb = path.join(root, "kb");
-    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    fs.writeFileSync(path.join(kb, "hello.md"), "hello world\n");
-    const s = knowbase(["sync"]);
-    expect(s.code).toBe(0);
-    expect(s.out).toContain("已推送到远端");
-
-    // 另一 clone 验证
-    const other = path.join(root, "other");
-    g(root, "clone", bare, other);
-    expect(fs.existsSync(path.join(other, "hello.md"))).toBe(true);
-  });
-
-  it("pause 醒目显示 / resume 恢复", () => {
-    const kb = path.join(root, "kb");
-    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
-
-    const p = knowbase(["pause"]);
-    expect(p.code).toBe(0);
-    expect(fs.existsSync(path.join(kb, ".knowbase-pause"))).toBe(true);
-
-    const st = knowbase(["status"]);
-    expect(st.out).toContain("已暂停");
-
-    const rs = knowbase(["resume"]);
-    expect(rs.code).toBe(0);
-    expect(fs.existsSync(path.join(kb, ".knowbase-pause"))).toBe(false);
-  });
 
   it("status 展示 CLI 版本（已接入与未接入都要有）", () => {
     const pkgVersion = (
@@ -297,24 +274,13 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(after.out).toContain(`CLI 版本：  ${pkgVersion}`);
   });
 
-  it("status 反映：守护进程未运行 + 冲突副本（AC4）", () => {
+  it("status 反映：守护进程未运行（AC4）", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    // 制造一个冲突副本文件
-    fs.writeFileSync(
-      path.join(kb, "note.conflict-hostZ-20260729T120000.txt"),
-      "local version\n"
-    );
-
     const st = knowbase(["status"]);
-    // 守护进程未运行（测试未启动 daemon）
     expect(st.out).toContain("守护进程");
     expect(st.out).toContain("未运行");
-    // 冲突副本被检出
-    expect(st.out).toContain("冲突副本");
-    expect(st.out).toContain("note.conflict-");
-    // 有异常 → 退出码非 0
     expect(st.code).not.toBe(0);
   });
 
@@ -322,9 +288,10 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     const kb = path.join(root, "kb");
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
-    // 清空 clone 下来的种子文件（README.md 等），验证「知识库暂无文件」这个
-    // day one 的正常状态，不算异常
-    fs.rmSync(path.join(kb, "README.md"), { force: true });
+    // 清空 clone 下来的种子文件（镜像种子带 docs/guide.md），验证「知识库暂无文件」
+    // 这个 day one 的正常状态，不算异常。镜像目录是只读的，先解锁再删。
+    fs.chmodSync(path.join(kb, "docs", "guide.md"), 0o644);
+    fs.rmSync(path.join(kb, "docs"), { recursive: true, force: true });
     const missing = knowbase(["status"]);
     expect(missing.out).toContain("agent 提示词");
     expect(missing.out).toContain("知识库暂无文件");
@@ -502,7 +469,8 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
     // 清空 clone 下来的种子文件，模拟「知识库确实没有文件」
-    fs.rmSync(path.join(kb, "README.md"), { force: true });
+    fs.chmodSync(path.join(kb, "docs", "guide.md"), 0o644);
+    fs.rmSync(path.join(kb, "docs"), { recursive: true, force: true });
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
     // 区块：走回退文案，不出现空的目录树小节
@@ -607,88 +575,4 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
   });
 });
 
-describe("status 展示 push 熔断", () => {
-  it("pushBlocked 存在时给出只读模式提示并以非零退出", () => {
-    const kb = path.join(root, "kb");
-    expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
 
-    // status 只读状态文件，不需要真跑守护进程；直接构造一份。
-    // 测试里 KNOWBASE_SKIP_AUTOSTART=1，init 不会产生 daemon.state.json，所以是新建。
-    // pid 用当前进程（确实存活）→ status 判定「运行中」，避免多出一条无关 anomaly，
-    // 让退出码 1 只由 pushBlocked 贡献。
-    const statePath = path.join(home, ".config", "knowbase", "daemon.state.json");
-    fs.mkdirSync(path.dirname(statePath), { recursive: true });
-    fs.writeFileSync(
-      statePath,
-      JSON.stringify(
-        {
-          pid: process.pid,
-          startedAt: new Date(Date.UTC(2026, 7, 5, 11, 0, 0)).toISOString(),
-          pushBlocked: {
-            since: new Date(Date.UTC(2026, 7, 5, 12, 0, 0)).toISOString(),
-            reason: "GitLab: You are not allowed to push code to this project.",
-            nextProbeAt: new Date(Date.UTC(2026, 7, 5, 12, 5, 0)).toISOString(),
-          },
-        },
-        null,
-        2
-      )
-    );
-
-    const r = knowbase(["status"]);
-    expect(r.out).toContain("无 push 权限");
-    expect(r.out).toContain("You are not allowed to push code to this project.");
-    expect(r.out).toContain("无需手动操作");
-    expect(r.code).toBe(1);
-  });
-});
-
-describe("init 写权限预检", () => {
-  it("无 push 权限时警告只读模式但不阻断接入", () => {
-    const kb = path.join(root, "kb");
-    const shimDir = makeDenyDryRunShim(path.join(root, "git-shim"));
-    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"], {
-      PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    });
-    expect(r.code).toBe(0); // 不阻断
-    expect(r.out).toContain("只读模式");
-    expect(r.out).toContain("无需重新 init");
-    // 配置照常写入，接入流程走完
-    expect(fs.existsSync(path.join(home, ".config", "knowbase", "config.json"))).toBe(true);
-  });
-
-  it("有权限时不出现只读模式警告", () => {
-    const kb = path.join(root, "kb");
-    const r = knowbase(["init", bare, "--dir", kb, "--no-agent-config"]);
-    expect(r.code).toBe(0);
-    expect(r.out).not.toContain("只读模式");
-  });
-
-  it("无权限且需种入规则时：种规则分支走「暂不推送」", () => {
-    // makeOrigin 预置的远端已经带 union / 忽略规则，ensureLine 恒为 false，
-    // 走不到「种入规则」那段——用 makeBareOrigin 搭一个不含规则文件（但已有
-    // 提交，满足 headBorn 守卫）的远端，让 seeded=true，才能覆盖这条分支。
-    const kb = path.join(root, "kb");
-    const bareNoRules = makeBareOrigin(root);
-    const shimDir = makeDenyDryRunShim(path.join(root, "git-shim"));
-    const r = knowbase(["init", bareNoRules, "--dir", kb, "--no-agent-config"], {
-      PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
-    });
-    expect(r.code).toBe(0);
-    // 锁住 readOnly 分支的新文案——变异测试验证过：回退 init.ts 里这段改写
-    // 会让这条断言失败。
-    expect(r.out).toContain("暂不推送");
-    // 「守护进程会自动重试」这句旧文案只在「真实 push 失败且失败类型不是
-    // denied（如网络抖动）」时才会输出；本用例 readOnly=true，代码根本不走
-    // 真实 push，这句文案在只读路径上按构造不可达——就算去掉 readOnly 早退
-    // 分支，makeBareOrigin 搭的远端也没有拒绝机制，真实 push 会直接成功；
-    // 再给它装 denyPush 钩子，命中的也是 p.denied 分支、输出只读提示而非这
-    // 句文案。没有能让这条断言产生意义的测试环境，因此不对它做断言，避免
-    // 留一条名存实亡的断言误导后来者。
-    //
-    // 注：init.ts 里 p.denied 为真的那条警告分支（readOnly=false，但真实 push
-    // 被拒）同样覆盖不到——要触发它需要「写权限预检（探测分支/dry-run）判定
-    // 为有权限，但随后真实 push 却被拒」这种权限中途变化的场景，git shim 只能
-    // 模拟固定的 --dry-run 拒绝，无法模拟这种时序竞争，不为此硬造场景。
-  });
-});

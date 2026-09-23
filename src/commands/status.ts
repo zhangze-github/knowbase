@@ -8,7 +8,6 @@ import {
   logPath,
   readDaemonState,
   pidAlive,
-  isPaused,
 } from "../config.js";
 import * as git from "../git.js";
 import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
@@ -22,26 +21,6 @@ import {
 } from "../skills-sync.js";
 
 /** 递归扫描冲突副本（跳过 .git / node_modules，限制深度防止巨树卡顿）。 */
-function findConflictCopies(dir: string, depth = 0, acc: string[] = []): string[] {
-  if (depth > 8) return acc;
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return acc;
-  }
-  for (const e of entries) {
-    if (e.name === ".git" || e.name === "node_modules") continue;
-    const full = path.join(dir, e.name);
-    if (e.isDirectory()) {
-      findConflictCopies(full, depth + 1, acc);
-    } else if (e.name.includes(".conflict-")) {
-      acc.push(full);
-    }
-  }
-  return acc;
-}
-
 function fmtTime(iso?: string): string {
   if (!iso) return "从未";
   const d = new Date(iso);
@@ -138,48 +117,6 @@ export function cmdStatus(): number {
     }
   }
 
-  // 暂停状态（醒目）
-  if (isPaused(cfg.dir)) {
-    console.log("");
-    console.log("⏸  已暂停自动同步（存在 .knowbase-pause）。运行 `knowbase resume` 恢复。");
-  }
-
-  // 本地待推送
-  let uncommitted = 0;
-  let ahead = 0;
-  if (git.isRepo(cfg.dir)) {
-    uncommitted = git.changedFiles(cfg.dir).length;
-    ahead = git.aheadCount(cfg.dir, `origin/${cfg.branch}`);
-  }
-  if (!mirrorMode) {
-    console.log("");
-    console.log(`本地未提交改动：${uncommitted} 个文件`);
-    console.log(`本地领先远端：  ${ahead} 个提交（未推送，以上次 fetch 为准）`);
-  }
-
-  // push 熔断（无写权限）——必须醒目：用户看到的「本地领先 N 个提交」
-  // 在这种状态下意味着这些提交永远推不出去。
-  if (!mirrorMode && state?.pushBlocked) {
-    const pb = state.pushBlocked;
-    console.log("");
-    console.log(`⚠ 无 push 权限：本地 ${ahead} 个提交只在本机，未同步给团队。`);
-    console.log(`  原因：${pb.reason}`);
-    if (running) {
-      console.log(
-        `  下次自动重试：${new Date(pb.nextProbeAt).toLocaleString()}。` +
-          `补上权限后会自动恢复，无需手动操作。`
-      );
-      anomalies.push(
-        `无 push 权限，${ahead} 个提交未推送给团队——请联系仓库管理员补上写权限，之后自动恢复。`
-      );
-    } else {
-      console.log(`  守护进程未运行，恢复运行后会自动重试。`);
-      anomalies.push(
-        `无 push 权限，${ahead} 个提交未推送给团队——请先恢复守护进程运行，并联系仓库管理员补上写权限，之后自动恢复。`
-      );
-    }
-  }
-
   // agent 提示词目录树（这个机制默认静默运行，必须给出可见性）
   console.log("");
   if (cfg.agentConfig === false) {
@@ -257,20 +194,6 @@ export function cmdStatus(): number {
       console.log(`  ⚠ 跳过 ${c.name}：${c.reason}`);
       anomalies.push(`团队 skill ${c.name} 未分发：${c.reason}`);
     }
-  }
-
-  // 冲突副本
-  const copies = findConflictCopies(cfg.dir);
-  if (copies.length > 0) {
-    console.log("");
-    console.log(`⚠ 待处理冲突副本 ${copies.length} 个：`);
-    for (const c of copies.slice(0, 20)) {
-      console.log(`  - ${path.relative(cfg.dir, c)}`);
-    }
-    if (copies.length > 20) console.log(`  …… 还有 ${copies.length - 20} 个`);
-    anomalies.push(`存在 ${copies.length} 个冲突副本待人工/AI 合并。`);
-  } else {
-    console.log("冲突副本：      无");
   }
 
   // 远端连通性 / 凭证

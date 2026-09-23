@@ -138,28 +138,6 @@ describe("discardLocalChanges", () => {
     expect(fs.existsSync(path.join(dir, ".knowbase-pause"))).toBe(true);
   });
 
-  it("暂停标记被保留但不计入返回列表（exporter 忘记 .gitignore）", () => {
-    // 此场景：.gitignore 不含 .knowbase-pause，导致 changedFiles 会看到它
-    const dir = tmpDir("discard-no-pause-gitignore");
-    g(dir, "init", "-b", "main", ".");
-    setIdentity(dir);
-    // 故意不加 .knowbase-pause 进 .gitignore
-    write(dir, ".gitignore", "");
-    write(dir, "a.md", "原文\n");
-    g(dir, "add", "-A");
-    g(dir, "commit", "-m", "init");
-
-    // 写入暂停标记（此时会被 changedFiles 看到）与真实改动
-    write(dir, ".knowbase-pause", "");
-    write(dir, "c.md", "新增\n");
-    const { files } = discardLocalChanges(dir);
-
-    // 暂停标记被保留在磁盘上
-    expect(fs.existsSync(path.join(dir, ".knowbase-pause"))).toBe(true);
-    // 但不应计入返回列表（由 -e PAUSE_MARKER 与过滤共同保护）
-    expect(files).not.toContain(".knowbase-pause");
-    expect(files).toContain("c.md");
-  });
 
   it("工作区干净时返回空数组、无 error", () => {
     const dir = makeRepo();

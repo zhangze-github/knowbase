@@ -323,11 +323,10 @@ describe("区块内嵌目录树", () => {
     expect(b).toContain("**导航**");
   });
 
-  it("区块告诉 agent 可执行流程该沉淀到 skills/", () => {
-    // 不告诉 agent 这个位置存在，它永远只会往 md 里写散文，不会产出 skill
+  it("区块说明团队 skill 走 git 仓库维护、本机以 org- 前缀出现", () => {
+    // skills/ 不走飞书，这条边界不写清楚 agent 会试图用 lark-wiki 建 skill
     const b = buildBlock("/kb");
     expect(b).toContain("skills/");
-    expect(b).toContain("SKILL.md");
     expect(b).toContain("org-");
   });
 
@@ -545,7 +544,7 @@ describe("原子写安全性（并发 / 软链）", () => {
 
 describe("镜像模式区块文案", () => {
   it("镜像变体：只读声明 + feishu_url 引导 + 平权自主归属，无专属 AI 目录", () => {
-    const block = buildBlock("/kb", null, {});
+    const block = buildBlock("/kb", null);
     expect(block).toContain("只读本地镜像");
     expect(block).toContain("feishu_url");
     expect(block).toContain("lark-doc");
@@ -558,15 +557,17 @@ describe("镜像模式区块文案", () => {
   });
 
   it("镜像变体：组织/个人内容边界写明", () => {
-    const block = buildBlock("/kb", null, {});
+    const block = buildBlock("/kb", null);
     expect(block).toContain("复用价值");
     expect(block).toContain("个人偏好");
     expect(block).toContain("不进知识库");
     expect(block).toContain("询问用户");
   });
 
-  it("第三参缺省：输出与经典文案逐字一致", () => {
-    expect(buildBlock("/kb", "索引内容")).toBe(buildBlock("/kb", "索引内容", null));
-    expect(buildBlock("/kb", "索引内容")).toContain("保存即同步");
+  it("只有镜像一种文案：经典模式的「保存即同步」不得再出现", () => {
+    // 1.0.0 废弃经典模式。这句话在只读镜像下是错误引导——照做会写失败、
+    // 且内容在下个同步周期被丢弃。
+    expect(buildBlock("/kb", "索引内容")).not.toContain("保存即同步");
+    expect(buildBlock("/kb", "索引内容")).toContain("只读本地镜像");
   });
 });

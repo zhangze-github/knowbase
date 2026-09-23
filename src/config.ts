@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 
 /** 暂停标记文件名（product.md §2.5）。存在即跳过同步周期。 */
-export const PAUSE_MARKER = ".knowbase-pause";
 
 /** 默认同步间隔（秒）。 */
 export const DEFAULT_INTERVAL = 60;
@@ -68,16 +67,6 @@ export function daemonStatePath(): string {
   return path.join(configDir(), "daemon.state.json");
 }
 
-/** push 熔断状态快照（写入 DaemonState 供 status 展示）。 */
-export interface PushBlocked {
-  /** 首次判定无权限的时刻（ISO）。 */
-  since: string;
-  /** 服务端给出的原因原文（单行）。 */
-  reason: string;
-  /** 下一次自动探测的时刻（ISO）。 */
-  nextProbeAt: string;
-}
-
 /** 守护进程心跳状态：CLI 与守护进程之间无 IPC，靠这个文件传递健康度。 */
 export interface DaemonState {
   pid: number;
@@ -90,9 +79,6 @@ export interface DaemonState {
   lastOkCycleAt?: string;
   /** 最近一次周期的错误说明（网络失败等）。 */
   lastError?: string;
-  paused?: boolean;
-  /** 无 push 权限而熔断时存在；恢复后清空。 */
-  pushBlocked?: PushBlocked;
   /** 镜像模式（仓库内存在 .knowbase-mirror.json，spec §4.1）。 */
   mirror?: boolean;
   /** 最近一次本地改动被丢弃的记录（镜像模式，spec §4.4）。 */
@@ -134,15 +120,6 @@ export function pidAlive(pid: number): boolean {
     // ESRCH: 不存在; EPERM: 存在但无权限（视为存活）
     return (e as NodeJS.ErrnoException).code === "EPERM";
   }
-}
-
-/** 暂停标记文件的完整路径。 */
-export function pauseMarkerPath(dir: string): string {
-  return path.join(dir, PAUSE_MARKER);
-}
-
-export function isPaused(dir: string): boolean {
-  return fs.existsSync(pauseMarkerPath(dir));
 }
 
 export function configExists(): boolean {
