@@ -27,19 +27,19 @@ const program = new Command();
 program
   .name("knowbase")
   .description(
-    "AI 时代的团队知识库同步工具：安装即忘，本地文件夹 ⇋ Git 远端后台自动双向同步，冲突全自动处理。"
+    "以飞书知识库为唯一真相源的团队知识镜像：安装即忘，后台自动把飞书内容同步成本地只读 Markdown，人和 AI 都能直接 grep。"
   )
   .version(pkg.version, "-v, --version", "输出版本号");
 
 program
   .command("init")
-  .argument("<git-url>", "知识库 Git 远端地址（GitHub/GitLab 私有仓库）")
+  .argument("<git-url>", "飞书镜像仓库的 Git 地址（由 knowbase exporter 导出，仓库根须有 .knowbase-mirror.json）")
   .option("--dir <path>", "本地知识库目录（默认 ~/org-kb）")
   .option("--branch <branch>", "同步分支（默认 main）")
   .option("--interval <seconds>", "同步间隔秒数（默认 60）")
   .option("--no-agent-config", "跳过写入 Claude Code / Codex 全局提示词")
   .option("--no-skills", "跳过把知识库 skills/ 分发到所有分发目标（Claude Code / Codex）")
-  .description("一次性接入：环境检查 → clone → 种入规则 → 注册自启 → 配置 AI agent 全局提示词")
+  .description("一次性接入：环境检查 → clone → 上只读锁 → 注册自启 → 配置 AI agent 全局提示词")
   .action((url: string, opts: InitOptions) => run(() => cmdInit(url, opts)));
 
 program
@@ -52,11 +52,9 @@ program
   .description("立即从飞书镜像拉取一次（前台输出过程，不必等轮询）")
   .action(() => run(cmdSync));
 
-
-
 program
   .command("uninstall")
-  .description("干净移除：注销自启、停止守护进程，保留本地文件夹")
+  .description("干净移除：注销自启、停止守护进程、删除配置与 agent 提示词区块，保留本地文件夹")
   .action(() => run(cmdUninstall));
 
 program

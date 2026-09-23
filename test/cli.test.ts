@@ -121,6 +121,22 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     expect(h.out).toContain("uninstall");
     // daemon 为隐藏命令，不应出现在帮助中
     expect(h.out).not.toContain("daemon");
+    // 已删除的命令不得残留在帮助里
+    expect(h.out).not.toContain("pause");
+    expect(h.out).not.toContain("resume");
+  });
+
+  it("帮助文案不描述已废弃的经典模式行为", () => {
+    // 1.0.0 删功能时漏改了 .description() 字符串，帮助里仍写着「双向同步」「种入规则」，
+    // 而这些行为已经不存在——纯文案不会被任何行为测试抓到，只能这样锁住。
+    const h = knowbase(["--help"]);
+    expect(h.out).not.toContain("双向同步");
+    expect(h.out).not.toContain("种入规则");
+    expect(h.out).not.toContain("冲突");
+
+    const ih = knowbase(["init", "--help"]);
+    expect(ih.out).not.toContain("种入规则");
+    expect(ih.out).toContain("只读");
   });
 
   it("init → 写配置、跳过自启、不产生新 commit", () => {
