@@ -36,7 +36,8 @@
     "prepublishOnly": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest",
-    "dev": "tsc -w -p tsconfig.json"
+    "dev": "tsc -w -p tsconfig.json",
+    "prebuild": "rm -rf dist"
   },
   "dependencies": {
     "commander": "^12.1.0",
