@@ -12,6 +12,9 @@ import {
   agentTargets,
   readKbTree,
   TREE_MAX_BYTES,
+  DIR_HEAD,
+  DIR_TAIL,
+  MIN_HIDDEN,
   MirrorBlockInfo,
 } from "../src/agent-config.js";
 import { tmpDir } from "./helpers.js";
@@ -169,19 +172,129 @@ describe("目录树读取", () => {
     }
   );
 
-  it("大量文件超 8KB → truncated，含截断提示，正文行完整且 ≤ TREE_MAX_BYTES", () => {
-    // 每个文件名占一行；造出远超 8KB 的树
+  it("目录数过多仍可能超 8KB → truncated，含截断提示，正文行完整", () => {
+    // 宽度折叠只约束单目录内的文件数，目录本身不折叠：造大量目录仍能撑爆字节上限，
+    // 验证 TREE_MAX_BYTES 这层兜底在折叠之后依然有效。
     for (let i = 0; i < 2000; i++) {
-      fs.writeFileSync(path.join(kb, `file-${String(i).padStart(5, "0")}.md`), "x");
+      const d = `dir-${String(i).padStart(5, "0")}`;
+      fs.mkdirSync(path.join(kb, d));
+      fs.writeFileSync(path.join(kb, d, "a.md"), "x");
     }
     const r = readKbTree(kb);
     expect(r.truncated).toBe(true);
     expect(r.text!).toContain("已截断");
     const body = r.text!.split("\n\n…")[0];
-    // 正文每一行都应是完整的文件名（没有被从中间切断）
-    expect(body.split("\n").every((l) => /^file-\d{5}\.md$/.test(l))).toBe(true);
+    // 正文每一行都应完整（没有被从中间切断）
+    expect(body.split("\n").every((l) => /^(dir-\d{5}\/|  a\.md)$/.test(l))).toBe(true);
     expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(TREE_MAX_BYTES);
     expect(r.bytes).toBeGreaterThan(TREE_MAX_BYTES);
+  });
+
+  it("目录内文件数不超上限 → 全部列出，无折叠行", () => {
+    const n = DIR_HEAD + DIR_TAIL;
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
+    }
+    const r = readKbTree(kb);
+    expect(r.text!.split("\n")).toHaveLength(n);
+    expect(r.text).not.toContain("未列出");
+    expect(r.hidden).toBe(0);
+    expect(r.files).toBe(n);
+  });
+
+  it("超出上限但隐藏数不足 MIN_HIDDEN → 不折叠，全部列出", () => {
+    // 折叠行本身要占约 50 字节，而一个文件名行约 45 字节：只藏一两篇是净亏，
+    // 还白白让 agent 以为清单不完整。
+    const n = DIR_HEAD + DIR_TAIL + MIN_HIDDEN - 1;
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
+    }
+    const r = readKbTree(kb);
+    expect(r.text!.split("\n")).toHaveLength(n);
+    expect(r.text).not.toContain("未列出");
+    expect(r.hidden).toBe(0);
+    expect(r.files).toBe(n);
+  });
+
+  it("隐藏数刚好达到 MIN_HIDDEN → 开始折叠", () => {
+    const n = DIR_HEAD + DIR_TAIL + MIN_HIDDEN;
+    for (let i = 0; i < n; i++) {
+      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
+    }
+    const r = readKbTree(kb);
+    expect(r.text!.split("\n")).toHaveLength(DIR_HEAD + 1 + DIR_TAIL);
+    expect(r.text).toContain(`另有 ${MIN_HIDDEN} 篇未列出`);
+    expect(r.hidden).toBe(MIN_HIDDEN);
+  });
+
+  it("超出上限 → 保留前 5 与后 5，中间折叠成一行提示", () => {
+    for (let i = 0; i < 25; i++) {
+      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
+    }
+    const r = readKbTree(kb);
+    const lines = r.text!.split("\n");
+    expect(lines).toHaveLength(DIR_HEAD + 1 + DIR_TAIL);
+    expect(lines.slice(0, DIR_HEAD)).toEqual([
+      "f-00.md",
+      "f-01.md",
+      "f-02.md",
+      "f-03.md",
+      "f-04.md",
+    ]);
+    expect(lines.slice(DIR_HEAD + 1)).toEqual([
+      "f-20.md",
+      "f-21.md",
+      "f-22.md",
+      "f-23.md",
+      "f-24.md",
+    ]);
+    // 折叠行必须同时说清「隐藏了多少」与「怎么看到全部」
+    expect(lines[DIR_HEAD]).toContain("另有 15 篇未列出");
+    expect(lines[DIR_HEAD]).toContain("共 25 篇");
+    expect(lines[DIR_HEAD]).toContain("grep");
+    expect(r.hidden).toBe(15);
+    // 计数含被折叠隐藏的文件：status 要报知识库的真实规模
+    expect(r.files).toBe(25);
+  });
+
+  it("折叠按目录独立生效，父目录折叠不影响子目录；折叠行缩进与同级文件一致", () => {
+    fs.mkdirSync(path.join(kb, "sub"));
+    for (let i = 0; i < 30; i++) {
+      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
+    }
+    for (let i = 0; i < 3; i++) {
+      fs.writeFileSync(path.join(kb, "sub", `s-${i}.md`), "x");
+    }
+    const r = readKbTree(kb);
+    const lines = r.text!.split("\n");
+    // 子目录只有 3 篇，全列
+    expect(lines).toContain("  s-0.md");
+    expect(lines).toContain("  s-2.md");
+    // 根目录折叠，且折叠行不带缩进（与根下文件同级）
+    const fold = lines.find((l) => l.includes("未列出"))!;
+    expect(fold.startsWith(" ")).toBe(false);
+    expect(r.hidden).toBe(20);
+    expect(r.files).toBe(33);
+  });
+
+  it("深度不受限制：深层目录照常递归到底", () => {
+    fs.mkdirSync(path.join(kb, "a", "b", "c", "d"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "a", "b", "c", "d", "deep.md"), "x");
+    const r = readKbTree(kb);
+    expect(r.text).toContain("        deep.md");
+    expect(r.files).toBe(1);
+  });
+
+  it("有界性：单目录文件数从 100 涨到 5000，注入行数不变", () => {
+    const linesFor = (n: number): number => {
+      fs.rmSync(kb, { recursive: true, force: true });
+      fs.mkdirSync(kb, { recursive: true });
+      for (let i = 0; i < n; i++) {
+        fs.writeFileSync(path.join(kb, `f-${String(i).padStart(5, "0")}.md`), "x");
+      }
+      return readKbTree(kb).text!.split("\n").length;
+    };
+    expect(linesFor(5000)).toBe(linesFor(100));
   });
 });
 

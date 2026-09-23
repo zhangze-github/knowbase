@@ -194,7 +194,12 @@ export function cmdStatus(): number {
     } else {
       const kbSize = (tree.bytes / 1024).toFixed(1);
       const note = tree.truncated ? `，超 ${TREE_MAX_BYTES / 1024}KB 已截断` : "";
-      console.log(`agent 提示词：已注入目录树（${tree.files} 个文件，${kbSize}KB${note}）`);
+      // 折叠是常态而非异常（目录一宽就会发生），但必须可见：否则用户无从知道
+      // 注入给 agent 的树并不是完整清单。
+      const fold = tree.hidden > 0 ? `，其中 ${tree.hidden} 篇因目录过宽已折叠` : "";
+      console.log(
+        `agent 提示词：已注入目录树（${tree.files} 个文件${fold}，${kbSize}KB${note}）`
+      );
     }
   }
 

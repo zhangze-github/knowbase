@@ -65,12 +65,43 @@ function truncateAtLine(text: string, max: number): { text: string; truncated: b
 export interface KbTree {
   /** 可直接内嵌的树文本；知识库无文件时为 null。 */
   text: string | null;
-  /** 文件总数（不含被跳过的条目）。 */
+  /**
+   * 文件总数（不含被跳过的条目），**含**因目录过宽被折叠隐藏的那些。
+   * 折叠是展示策略，不改变知识库的真实规模——status 报的必须是真实规模。
+   */
   files: number;
-  /** 完整树文本的原始字节数（截断前，供 status 展示）。 */
+  /** 因目录过宽被折叠隐藏、未出现在树文本里的文件数。 */
+  hidden: number;
+  /** 树文本的字节数（折叠后、字节截断前，供 status 展示）。 */
   bytes: number;
   truncated: boolean;
 }
+
+/**
+ * 单个目录内列出的文件数上限：超过 DIR_HEAD + DIR_TAIL 时只保留头尾两段，
+ * 中间折叠成一行提示。**只限宽度，不限深度**。
+ *
+ * 为什么限宽而不限深：知识库的增长发生在目录宽度上（同一主题下持续追加文档），
+ * 深度由人在飞书里的节点层级决定，本身是收敛的。只限深度对平铺型知识库完全
+ * 无效——实测样本 12 篇里有 9 篇平铺在同一目录下，限深 3 层省 0 字节。
+ * 限宽之后注入行数的上界是「目录数 × (DIR_HEAD + 1 + DIR_TAIL)」，与文件总数
+ * 无关，知识库再怎么涨都不会撑爆提示词预算。
+ *
+ * 为什么留头也留尾、而不是只留前 10：文件按名字排序，头尾两段合起来能露出这个
+ * 目录的命名风格与取值范围（最早/最晚、A 段/Z 段），比同样字数的单侧前缀更能
+ * 让 agent 判断「我要找的东西是否可能在这个目录里」。
+ */
+export const DIR_HEAD = 5;
+export const DIR_TAIL = 5;
+
+/**
+ * 折叠的最小收益门槛：隐藏数不到这个值就全列，不折叠。
+ *
+ * 折叠行本身要占约 50 字节，而一个中文文件名行约 45 字节——藏 1 篇是净亏，
+ * 藏 2 篇只省 40 字节。收益微薄时折叠还有额外代价：平白告诉 agent「这份清单
+ * 不完整」，诱导它多跑一次无谓的 grep。从 3 篇起收益才明显盖过这两项成本。
+ */
+export const MIN_HIDDEN = 3;
 
 /**
  * 递归列出一层目录下的行：目录先于文件、各自按默认字符串排序，保证
@@ -80,7 +111,12 @@ export interface KbTree {
  * 这些对 agent 定位知识没有意义，混进树里只会稀释信噪比。
  * 任意一层 readdir 失败（目录不存在、权限问题等）当作空，不向上抛。
  */
-function listTree(dir: string, indent: string, acc: string[], counter: { files: number }): void {
+function listTree(
+  dir: string,
+  indent: string,
+  acc: string[],
+  counter: { files: number; hidden: number }
+): void {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -94,10 +130,21 @@ function listTree(dir: string, indent: string, acc: string[], counter: { files: 
     acc.push(`${indent}${name}/`);
     listTree(path.join(dir, name), indent + "  ", acc, counter);
   }
-  for (const name of files) {
-    acc.push(`${indent}${name}`);
-    counter.files++;
+  counter.files += files.length;
+  const hidden = files.length - DIR_HEAD - DIR_TAIL;
+  if (hidden < MIN_HIDDEN) {
+    for (const name of files) acc.push(`${indent}${name}`);
+    return;
   }
+  counter.hidden += hidden;
+  for (const name of files.slice(0, DIR_HEAD)) acc.push(`${indent}${name}`);
+  // 折叠行必须同时说清「隐藏了多少」与「怎么看到全部」。只写省略号会让 agent 把
+  // 这份列表当成完整清单，在里面找不到就得出「知识库里没有」的错误负结论——那
+  // 比压根不注入更坏，因为不注入时它至少还会去 grep。
+  acc.push(
+    `${indent}…另有 ${hidden} 篇未列出（本目录共 ${files.length} 篇），grep 本目录定位`
+  );
+  for (const name of files.slice(-DIR_TAIL)) acc.push(`${indent}${name}`);
 }
 
 /**
@@ -114,10 +161,10 @@ function listTree(dir: string, indent: string, acc: string[], counter: { files: 
  */
 export function readKbTree(dir: string): KbTree {
   const lines: string[] = [];
-  const counter = { files: 0 };
+  const counter = { files: 0, hidden: 0 };
   listTree(dir, "", lines, counter);
   if (lines.length === 0) {
-    return { text: null, files: 0, bytes: 0, truncated: false };
+    return { text: null, files: 0, hidden: 0, bytes: 0, truncated: false };
   }
   const raw = lines.join("\n");
   const bytes = Buffer.byteLength(raw, "utf8");
@@ -125,7 +172,13 @@ export function readKbTree(dir: string): KbTree {
   const text = cut.truncated
     ? `${cut.text}\n\n…（目录树过长已截断，其余文件直接 grep 全库定位）`
     : cut.text;
-  return { text, files: counter.files, bytes, truncated: cut.truncated };
+  return {
+    text,
+    files: counter.files,
+    hidden: counter.hidden,
+    bytes,
+    truncated: cut.truncated,
+  };
 }
 
 /**
@@ -165,7 +218,7 @@ ${tree}`
 
 **团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
 
-**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题）；先在树中定位文件路径再读取，树被截断或找不到时 grep 全库。
+**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题），先在树中定位路径再读取。树不是完整清单——文件多的目录只列头尾各 5 篇、中间折叠成「另有 N 篇未列出」；**树里找不到不等于库里没有**，遇到折叠标记或没把握时一律 grep 全库确认。
 
 ${treeSection}
 ${BLOCK_END}`;
@@ -186,7 +239,7 @@ ${BLOCK_END}`;
 
 **操作**：直接读写 Markdown，保存即同步，无需 git add/commit/push。大范围改动前 \`knowbase pause\`，完成后 \`knowbase resume\`。
 
-**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题）；先在树中定位文件路径再读取，树被截断或找不到时 grep 全库。
+**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题），先在树中定位路径再读取。树不是完整清单——文件多的目录只列头尾各 5 篇、中间折叠成「另有 N 篇未列出」；**树里找不到不等于库里没有**，遇到折叠标记或没把握时一律 grep 全库确认。
 
 ${treeSection}
 ${BLOCK_END}`;
