@@ -6,6 +6,7 @@ RUN npm ci --no-audit --no-fund
 COPY tsconfig.json vitest.config.ts ./
 COPY src ./src
 COPY test ./test
+COPY .github/scripts ./.github/scripts
 RUN npm run build && chown -R node:node /workspace
 USER node
 ENV KNOWBASE_SKIP_AUTOSTART=1

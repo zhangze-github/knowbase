@@ -7,3 +7,6 @@
 !src/**
 !test/
 !test/**
+!.github/
+!.github/scripts/
+!.github/scripts/**

@@ -199,6 +199,14 @@ skills/deploy/SKILL.md      ──►    ~/.hermes/skills/org-deploy/SKILL.md   
 
 采用提示式升级（不做自动热更新）：有新版时命令会提示，手动执行 `npm i -g knowbase` 即可。
 
+## npm 自动发布（维护者）
+
+推送 `main` 会触发 [GitHub Actions](https://github.com/zhangze-github/knowbase/actions/workflows/publish.yml)：检查版本、运行测试、构建并检查打包内容，全部通过后发布 npm 上尚未存在的新版本。版本已发布时跳过发布；registry 查询失败、版本倒退或 lockfile 版本不一致时失败。
+
+发布新版时，更新 CHANGELOG，执行 `npm version patch --no-git-tag-version`（也可用 `minor` / `major`），将 `package.json`、`package-lock.json` 和改动一起提交并推送到 `main`。无需另推版本标签，不会自动增加版本号；此流程仅发布稳定版本到 `latest`。
+
+认证使用 [npm Trusted Publishing](https://docs.npmjs.com/trusted-publishers/)，无需仓库 `NPM_TOKEN`。npm 包设置中授权 GitHub 用户 `zhangze-github`、仓库 `knowbase`、工作流文件 `publish.yml`，并允许直接 `npm publish`；不填写 Environment。授权变更可能需要包维护者完成一次 Passkey / 安全密钥验证。
+
 ## 环境变量
 
 - `KNOWBASE_SKIP_AUTOSTART=1`：`init` 时跳过自启注册（用于 CI / 容器 / 手动托管守护进程的场景）。
