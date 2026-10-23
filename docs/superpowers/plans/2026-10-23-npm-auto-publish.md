@@ -35,4 +35,5 @@
 - GREEN：新增 16 项测试通过；实际 registry 检查正确跳过 1.1.0。
 - Docker：普通用户全量 17 文件 / 287 项测试通过；TypeScript 构建通过。
 - 独立审阅：未发现需修复问题；工作流先构建再运行依赖 dist 的 CLI 测试。
-- npm trusted publisher 创建已准备，等待维护者 Passkey 验证。
+- npm trusted publisher 已创建：`zhangze-github/knowbase` / `publish.yml`，允许 publish。
+- main 已快进到包含 1.1.0 功能与本工作流的提交；首次运行记录待 GitHub 生成。
