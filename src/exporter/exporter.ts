@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import type { Logger } from "../config.js";
-import { addAll, commit, hasChanges, mv as gitMv, ok, push, pushFailureReason } from "../git.js";
+import { addAll, commit, fetch as fetchRemote, git, hasChanges, merge as mergeRemote, mv as gitMv, ok, push, pushFailureReason, upstreamExists } from "../git.js";
 import {
   newManifest,
   readExporterManifest,
@@ -160,6 +160,36 @@ export async function runExportOnce(
   };
 
   try {
+    // Skill MR 与正文导出共用同一远端分支。每轮先合并远端，再渲染飞书正文，
+    // 否则一次 non-fast-forward 就会令所有后续心跳永久推送失败。
+    const fetched = fetchRemote(cfg.repoDir, "origin");
+    if (!ok(fetched)) {
+      result.error = `拉取远端失败: ${fetched.stderr.trim() || fetched.stdout.trim()}`;
+      logger.log(`exporter: ${result.error}`);
+      return result;
+    }
+    const upstream = `origin/${cfg.branch}`;
+    if (upstreamExists(cfg.repoDir, upstream)) {
+      const behind = git(["rev-list", "--count", `HEAD..${upstream}`], { cwd: cfg.repoDir });
+      if (!ok(behind)) throw new Error(behind.stderr.trim() || behind.stdout.trim());
+      if (Number(behind.stdout.trim()) > 0) {
+        if (hasChanges(cfg.repoDir)) {
+          result.error = "合并远端失败: 导出工作区存在未提交改动，保留现场，等待处理";
+          logger.log(`exporter: ${result.error}`);
+          return result;
+        }
+        const merged = mergeRemote(cfg.repoDir, upstream);
+        if (!ok(merged)) {
+          const aborted = git(["merge", "--abort"], { cwd: cfg.repoDir, timeoutMs: 60000 });
+          result.error = `合并远端失败: ${merged.stderr.trim() || merged.stdout.trim()}`;
+          if (!ok(aborted)) result.error += `；中止合并失败: ${aborted.stderr.trim() || aborted.stdout.trim()}`;
+          logger.log(`exporter: ${result.error}`);
+          return result;
+        }
+        logger.log("exporter: 已合并远端更新，保留积压导出与团队 Skill 提交");
+      }
+    }
+
     // 1. 读 manifest，首轮没有则新建
     const manifest = readExporterManifest(cfg.repoDir) ?? newManifest(cfg.spaceId, cfg.host, cfg.inboxUrl);
     // 已有 manifest 时 newManifest 不会被调用，--inbox-url 就吃不到——运营者后补/更换

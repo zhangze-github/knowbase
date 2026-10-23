@@ -156,6 +156,11 @@ export function commit(dir: string, message: string): GitResult {
   return git([...identityArgs(dir), "commit", "-m", message], { cwd: dir });
 }
 
+/** 合并远端更新与 commit 使用同一身份兜底，支持无全局 Git 身份的 exporter。 */
+export function merge(dir: string, upstream: string, timeoutMs = 60000): GitResult {
+  return git([...identityArgs(dir), "merge", "--no-edit", upstream], { cwd: dir, timeoutMs });
+}
+
 export function fetch(dir: string, remote: string, timeoutMs = 60000): GitResult {
   return git(["fetch", remote], { cwd: dir, timeoutMs });
 }

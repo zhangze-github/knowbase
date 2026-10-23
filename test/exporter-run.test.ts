@@ -386,6 +386,81 @@ describe("增量周期与全量对账", () => {
     expect(bareHead).toBe(localHead);
   });
 
+  it("未配置 Git 身份时，仍能合并远端 Skill 与积压导出并保留双方内容", async () => {
+    const root = tmpDir("exp-remote-skills");
+    const bare = makeEmptyOrigin(root);
+    const dir = path.join(root, "exporter");
+    cloneWorkdir(bare, dir);
+    g(dir, "config", "user.name", "");
+    g(dir, "config", "user.email", "");
+    const A = node({ node_token: "A", obj_token: "oA", title: "指南" });
+    const client = new FakeClient([A], { oA: textBlocks("初始正文") });
+    const cfg: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
+    const now = ticker();
+    expect((await runExportOnce(cfg, { client, logger: quietLogger(root), now })).pushed).toBe(true);
+
+    denyPush(bare);
+    A.obj_edit_time = "200";
+    client.blocksByObjToken.oA = textBlocks("尚未推送的知识正文");
+    expect((await runExportOnce(cfg, { client, logger: quietLogger(root), now })).pushed).toBe(false);
+    allowPush(bare);
+    const other = path.join(root, "maintainer");
+    cloneWorkdir(bare, other);
+    fs.mkdirSync(path.join(other, "skills/example"), { recursive: true });
+    fs.writeFileSync(path.join(other, "skills/example/SKILL.md"), "团队新技能\n");
+    g(other, "add", "-A");
+    g(other, "commit", "-m", "update team skill");
+    expect(g(other, "push", "origin", "HEAD:main").code).toBe(0);
+    const remoteSkillCommit = g(other, "rev-parse", "HEAD").stdout.trim();
+    const pendingExportCommit = g(dir, "rev-parse", "HEAD").stdout.trim();
+
+    A.obj_edit_time = "300";
+    client.blocksByObjToken.oA = textBlocks("飞书最新正文");
+    const result = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+    expect(result.error).toBeUndefined();
+    expect(result.pushed).toBe(true);
+    expect(g(bare, "show", "main:skills/example/SKILL.md").stdout).toBe("团队新技能\n");
+    expect(g(bare, "show", "main:指南.md").stdout).toContain("飞书最新正文");
+    expect(g(bare, "merge-base", "--is-ancestor", remoteSkillCommit, "main").code).toBe(0);
+    expect(g(bare, "merge-base", "--is-ancestor", pendingExportCommit, "main").code).toBe(0);
+    expect(g(dir, "status", "--porcelain").stdout).toBe("");
+  });
+
+  it("远端与积压正文冲突时停止导出并中止合并，不遗留冲突状态", async () => {
+    const root = tmpDir("exp-remote-conflict");
+    const bare = makeEmptyOrigin(root);
+    const dir = path.join(root, "exporter");
+    cloneWorkdir(bare, dir);
+    const A = node({ node_token: "A", obj_token: "oA", title: "指南" });
+    const client = new FakeClient([A], { oA: textBlocks("初始正文") });
+    const cfg: ExporterConfig = { repoDir: dir, branch: "main", spaceId: "spc1", host: "acme.feishu.cn" };
+    const now = ticker();
+    await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+    const other = path.join(root, "other");
+    cloneWorkdir(bare, other);
+    denyPush(bare);
+    A.obj_edit_time = "200";
+    client.blocksByObjToken.oA = textBlocks("本地待推正文");
+    await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+    allowPush(bare);
+    fs.writeFileSync(path.join(other, "指南.md"), "另一个写入者的正文\n");
+    g(other, "add", "-A");
+    g(other, "commit", "-m", "conflicting mirror write");
+    expect(g(other, "push", "origin", "HEAD:main").code).toBe(0);
+    const pendingHead = g(dir, "rev-parse", "HEAD").stdout.trim();
+    const manifestBefore = read(dir, ".knowbase-mirror.json");
+
+    const result = await runExportOnce(cfg, { client, logger: quietLogger(root), now });
+    expect(result.error).toContain("合并远端失败");
+    expect(result.pushed).toBe(false);
+    expect(g(dir, "rev-parse", "HEAD").stdout.trim()).toBe(pendingHead);
+    expect(g(dir, "rev-parse", "--verify", "MERGE_HEAD").code).not.toBe(0);
+    expect(g(dir, "status", "--porcelain").stdout).toBe("");
+    expect(read(dir, ".knowbase-mirror.json")).toBe(manifestBefore);
+    expect(read(dir, "指南.md")).toContain("本地待推正文");
+    expect(g(bare, "show", "main:指南.md").stdout).toBe("另一个写入者的正文\n");
+  });
+
   // chmod 语义在 Windows 上不可靠（ACL 而非 rwx 位），无法保证真实阻断 rename/unlink，
   // 与仓库里 mirror.test.ts / skills-sync.test.ts 的既有惯例一致，跳过而非伪造通过。
   it.skipIf(process.platform === "win32")(
