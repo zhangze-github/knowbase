@@ -37,8 +37,8 @@ program
   .option("--dir <path>", "本地知识库目录（默认 ~/org-kb）")
   .option("--branch <branch>", "同步分支（默认 main）")
   .option("--interval <seconds>", "同步间隔秒数（默认 60）")
-  .option("--no-agent-config", "跳过写入 Claude Code / Codex 全局提示词")
-  .option("--no-skills", "跳过把知识库 skills/ 分发到所有分发目标（Claude Code / Codex）")
+  .option("--no-agent-config", "跳过配置 Claude Code / Codex / Cursor / Hermes 知识库上下文")
+  .option("--no-skills", "跳过把知识库 skills/ 分发到所有分发目标（Claude Code / Codex / Cursor / Hermes）")
   .description("一次性接入：环境检查 → clone → 上只读锁 → 注册自启 → 配置 AI agent 全局提示词")
   .action((url: string, opts: InitOptions) => run(() => cmdInit(url, opts)));
 

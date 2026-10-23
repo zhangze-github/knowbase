@@ -30,6 +30,8 @@ export interface Config {
   agentConfig?: boolean;
   /** 是否把知识库 skills/ 分发到所有分发目标（默认 true；init --no-skills 存 false）。 */
   skills?: boolean;
+  /** init 时选定的 Hermes 实例；守护进程不依赖交互 shell 的 HERMES_HOME。 */
+  hermesHome?: string;
 }
 
 /** 配置目录：$XDG_CONFIG_HOME/knowbase 或 ~/.config/knowbase 。 */
@@ -144,6 +146,7 @@ export function loadConfig(): Config {
     watch: parsed.watch !== false,
     agentConfig: parsed.agentConfig !== false,
     skills: parsed.skills !== false,
+    hermesHome: typeof parsed.hermesHome === "string" && path.isAbsolute(parsed.hermesHome) ? parsed.hermesHome : undefined,
   };
 }
 

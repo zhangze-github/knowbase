@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
 import { pidAlive } from "./config.js";
+import { additionalAgentHomes } from "./agent-installations.js";
 
 /**
  * 把知识库 skills/ 下的 agent skill 单向分发到本机各分发目标（见 skillTargets）。
@@ -10,8 +11,8 @@ import { pidAlive } from "./config.js";
  * 单向：托管副本是只读分发产物，在目标目录里手改不回写知识库，下个周期被
  * 静默覆盖。贡献路径只有一条——编辑知识库 skills/ 目录。
  *
- * 分发目标见 skillTargets：Claude Code 无条件，Codex 真实装了才分发。两端
- * SKILL.md 格式同构，副本逐字节一致。
+ * 分发目标见 skillTargets：Claude Code 无条件，其他客户端真实装了才分发。
+ * 各端 SKILL.md 格式同构，副本逐字节一致。
  */
 
 /** 知识库中存放 skill 的子目录。 */
@@ -542,7 +543,7 @@ const CODEX_INSTALL_MARKERS = ["config.toml", "auth.json", "sessions", "history.
  * 自动停止，无需任何命令。门控知识只放这一处，四个消费方都从这里取目标
  * （与 agentTargets 同一模式）。
  */
-export function skillTargets(home: string = os.homedir()): SkillTarget[] {
+export function skillTargets(home: string = os.homedir(), hermesHome?: string): SkillTarget[] {
   const targets: SkillTarget[] = [
     { name: "Claude Code", dir: path.join(home, ".claude", "skills") },
   ];
@@ -559,6 +560,7 @@ export function skillTargets(home: string = os.homedir()): SkillTarget[] {
   if (codexInstalled) {
     targets.push({ name: "Codex", dir: path.join(codexHome, "skills") });
   }
+  targets.push(...additionalAgentHomes(home, false, hermesHome).map(t => ({ name: t.name, dir: path.join(t.dir, "skills") })));
   return targets;
 }
 
@@ -721,10 +723,10 @@ function installSkill(src: SkillSource, skillsHome: string): void {
  * skill 不该拖垮整批分发；单个目标整体不可用同样不影响其他目标（该目标的
  * 条目各自落 failed，其余目标照常）。
  */
-export function syncSkills(kbDir: string, home: string = os.homedir()): SkillChange[] {
+export function syncSkills(kbDir: string, home: string = os.homedir(), hermesHome?: string): SkillChange[] {
   const { sources, invalid, protectedTargets } = readSkillSources(kbDir);
   const out: SkillChange[] = [...invalid];
-  for (const t of skillTargets(home)) {
+  for (const t of skillTargets(home, hermesHome)) {
     out.push(...syncSkillsToTarget(sources, protectedTargets, t));
   }
   return out;
@@ -819,9 +821,15 @@ export interface SkillRemoval {
  * 无标记的目录一律不碰——包括用户自己手写的 org-* skill。
  * ~/.codex 不存在时 Codex 目标不在列（skillTargets 已滤），天然跳过。
  */
-export function uninstallSkills(home: string = os.homedir()): SkillRemoval[] {
+export function uninstallSkills(home: string = os.homedir(), hermesHome?: string): SkillRemoval[] {
   const removals: SkillRemoval[] = [];
-  for (const t of skillTargets(home)) {
+  // Uninstall still owns delivered copies after a client removes its install markers.
+  const targets = new Map(skillTargets(home, hermesHome).map(t => [t.dir, t]));
+  for (const t of additionalAgentHomes(home, true, hermesHome)) {
+    const dir = path.join(t.dir, "skills");
+    targets.set(dir, { name: t.name, dir });
+  }
+  for (const t of targets.values()) {
     cleanTmpDirs(t.dir);
     for (const e of readExistingTargets(t.dir)) {
       if (!e.marker) continue;

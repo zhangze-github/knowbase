@@ -109,6 +109,52 @@ afterEach(() => {
 });
 
 describe("CLI 端到端（真实运行 dist/cli.js）", () => {
+  it("persists custom Hermes home for daemon, status and uninstall without the original environment", () => {
+    const custom = path.join(home, "hermes-profile");
+    fs.mkdirSync(custom, { recursive: true });
+    fs.writeFileSync(path.join(custom, "config.yaml"), "model: test\n");
+    seedRemoteSkill("deploy", "hermes-profile");
+    expect(knowbase(["init", bare, "--dir", path.join(home, "org-kb")], { HERMES_HOME: custom }).code).toBe(0);
+    const config = JSON.parse(fs.readFileSync(path.join(home, ".config/knowbase/config.json"), "utf8"));
+    expect(config.hermesHome).toBe(custom);
+    const status = knowbase(["status"], { HERMES_HOME: "" });
+    expect(status.out).toContain("知识库上下文（Hermes）：已配置");
+    expect(status.out).toContain("团队 skills（Hermes）：已分发 1 个");
+    expect(knowbase(["uninstall"], { HERMES_HOME: "" }).code).toBe(0);
+    expect(fs.existsSync(path.join(custom, "plugins/knowbase-context"))).toBe(false);
+    expect(fs.existsSync(path.join(custom, "skills/org-deploy"))).toBe(false);
+  });
+
+  it("Cursor / Hermes init → status → uninstall preserves user settings and skills", () => {
+    fs.mkdirSync(path.join(home, ".cursor"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".cursor/cli-config.json"), "{}");
+    fs.mkdirSync(path.join(home, ".hermes"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".hermes/config.yaml"), "# personal\nmodel: test\n");
+    const personal = path.join(home, ".cursor/skills/mine/SKILL.md");
+    fs.mkdirSync(path.dirname(personal), { recursive: true });
+    fs.writeFileSync(personal, "personal");
+    seedRemoteSkill("deploy", "extra-agents");
+    const env = { HERMES_HOME: path.join(home, ".hermes") };
+    const init = knowbase(["init", bare, "--dir", path.join(home, "org-kb")], env);
+    expect(init.code).toBe(0);
+    expect(init.out).toContain("Cursor");
+    expect(init.out).toContain("Hermes");
+    for (const folder of [".cursor", ".hermes"]) {
+      expect(fs.readFileSync(path.join(home, folder, "skills/org-deploy/SKILL.md"), "utf8")).toContain("name: org-deploy");
+    }
+    const status = knowbase(["status"], env);
+    expect(status.out).toContain("团队 skills（Cursor）：已分发 1 个");
+    expect(status.out).toContain("团队 skills（Hermes）：已分发 1 个");
+    expect(status.out).toContain("知识库上下文（Cursor）：已配置");
+    expect(status.out).toContain("知识库上下文（Hermes）：已配置");
+    const uninstall = knowbase(["uninstall"], env);
+    expect(uninstall.code).toBe(0);
+    expect(fs.existsSync(path.join(home, ".cursor/knowbase"))).toBe(false);
+    expect(fs.existsSync(path.join(home, ".hermes/plugins/knowbase-context"))).toBe(false);
+    expect(fs.readFileSync(personal, "utf8")).toBe("personal");
+    expect(fs.readFileSync(path.join(home, ".hermes/config.yaml"), "utf8")).toContain("# personal");
+  });
+
   it("--version / --help", () => {
     const v = knowbase(["--version"]);
     expect(v.code).toBe(0);

@@ -2,7 +2,7 @@
 
 > 以飞书知识库为唯一真相源的团队知识镜像。**安装即忘**：一条命令接入，开机自启，后台自动把飞书内容同步成本地只读 Markdown，人和 AI 都能直接 grep。
 
-面向重度使用 Claude Code / Codex 等 coding agent 的团队：组织的业务背景、历史决策、环境配置等**隐性知识**写在飞书知识库里（人的习惯不用改），knowbase 在每个成员本机维护一份只读镜像，让 agent 能零延迟、无外网依赖地 grep 到这些知识。
+面向重度使用 Claude Code / Codex / Cursor / Hermes 等 agent 的团队：组织的业务背景、历史决策、环境配置等**隐性知识**写在飞书知识库里（人的习惯不用改），knowbase 在每个成员本机维护一份只读镜像，让 agent 能零延迟、无外网依赖地 grep 到这些知识。
 
 **读走本地，写走飞书。** 本地目录是镜像，不是副本——所有 `.md` 设为只读，任何本地改动都会在下个同步周期被丢弃。要改知识，用文件头 frontmatter 里的 `feishu_url` 去飞书编辑，几分钟内自动回流到所有人本机。
 
@@ -34,7 +34,7 @@ knowbase status
 
 | 命令 | 作用 |
 |---|---|
-| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--no-agent-config] [--no-skills]` | 一次性接入，注册开机自启，并自动配置 Claude Code / Codex 全局提示词 |
+| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--no-agent-config] [--no-skills]` | 一次性接入，注册开机自启，并配置 Claude Code / Codex / Cursor / Hermes 知识库上下文 |
 | `knowbase status` | 一屏健康度：守护进程 / 上次同步 / 本地改动丢弃记录 / 远端连通性 |
 | `knowbase sync` | 立即从镜像拉取一次（前台输出，不必等轮询；也用于排查） |
 | `knowbase exporter` | 飞书 → 仓库的导出守护进程（部署在服务器侧，见下文） |
@@ -67,6 +67,14 @@ knowbase status
 |---|---|
 | Claude Code | `~/.claude/CLAUDE.md` |
 | Codex | `~/.codex/AGENTS.md` |
+| Cursor 桌面版 / CLI | 全局 `~/.cursor/hooks.json` 的 `workspaceOpen` hook 加载 `~/.cursor/knowbase/plugin/` 中的知识库规则 |
+| Hermes | `~/.hermes/plugins/knowbase-context/` 注入系统提示词；支持自定义 `HERMES_HOME` |
+
+Claude Code / Codex 使用全局 Markdown 文件；Cursor 和 Hermes 仅在检测到已安装客户端时配置官方 hook / 插件入口，不会在未安装的机器上创建其配置目录。已有用户升级后，重新执行原来的 `knowbase init <git-url>` 完成新客户端接入；后台只刷新既有上下文。Cursor 重新打开工作区后加载规则，Hermes 启动新会话（使用常驻 gateway 时重启 gateway）后生效。
+
+Cursor 需要支持 `workspaceOpen` / `pluginPaths` 的版本（沙盒验证使用 CLI `2026.10.16-e3cb207`）；Hermes 需要支持 `register_system_prompt_section` 的插件 API。Hermes 的 `plugins.disabled` 显式禁用会保留，个人 `SOUL.md` 不修改。Hermes 插件上下文最多 4,000 字符，目录树超长时附 grep 提示。已有 JSON / YAML 无效或同名目录非托管时会提示并跳过，不覆盖原配置。
+
+使用自定义 Hermes 实例时，在 `init` 前设置 `HERMES_HOME`。所选绝对路径会保存到 knowbase 配置的 `hermesHome`，守护进程、status 和 uninstall 不依赖原来交互终端的环境变量。一次接入维护一个 Hermes 实例；切换实例需重新 init。
 
 写入的内容是一个带标记的**托管区块**：
 
@@ -76,7 +84,7 @@ knowbase status
 `~/org-kb` —— 飞书知识库的只读本地镜像
 ...（读走本地 grep / 写走 feishu_url + lark-doc / 导航约定）...
 
-### 知识库目录树（全部文件，由 knowbase 自动生成）
+### 知识库目录树（由 knowbase 自动生成）
 
 项目/
   hicreator-contract 合同中台.md
@@ -91,6 +99,8 @@ knowbase status
 > ⚠️ **准则不限制凭据写入，请自行评估。** 写进飞书的内容会被 exporter 导出成明文 Git 仓库，每个成员本地都持有全量 clone——凭据一旦入库即永久留在 Git 历史中，撤销飞书权限也收不回。需要收紧的话，改 [`src/agent-config.ts`](src/agent-config.ts) 中的准则文案（例如只记录凭据的位置与获取方式，值本身不落库）。
 
 **自动目录树注入**：区块里内嵌知识库的目录树，agent 一开始就知道知识库里有什么、每个文件在哪个路径下，不必被提示才去 grep。
+
+仓库根 `skills/` 及其全部子文件不会注入知识库目录树，也不计入目录树的文件数和上下文预算。团队 skills 仍按原机制独立分发，由各客户端按需发现和加载。
 
 - **零维护、永不过期**：树由 knowbase 直接扫描文件系统生成，不依赖任何人工或 agent 维护的索引文件；文件名即飞书文档标题，本身就是天然的语义索引。
 - **注入量与知识库规模无关**（0.9.0 起）：单个目录内文件超过 10 篇时只列**头尾各 5 篇**，中间折叠成一行「另有 N 篇未列出（本目录共 M 篇），grep 本目录定位」。注入行数的上界是「目录数 × 11」，跟文件总数无关——知识库涨到几千篇也撑不爆提示词预算。
@@ -110,19 +120,30 @@ knowbase status
 
 ## 团队 skill 分发（自动）
 
-知识库不只沉淀散文——写在 `<知识库目录>/skills/<name>/SKILL.md`（需含 `name` / `description` 的 YAML frontmatter）的 agent skill（Claude Code 与 Codex 通用格式），会被自动分发到团队每个成员本机的 `~/.claude/skills/org-<name>/`；装了 Codex（`~/.codex/` 下存在 `config.toml` / `auth.json` / `sessions` / `history.jsonl` / `logs` 之一——真实 Codex 安装才会产出的条目，不是 knowbase 为写全局提示词顺手建的空目录或它自己留下的临时文件）的机器还会同步分发一份到 `~/.codex/skills/org-<name>/`，装上 Codex 后下个同步周期自动生效，卸掉后下个周期自动停止，无需任何操作。守护进程每个同步周期检测一次：源变了就更新，删了就撤下，新增就装上。写入区块的准则里也会提示 agent 把「怎么做某件事」的可执行流程沉淀到这里，而不是只写散文（见上一节的托管区块文案）。
+知识库 `skills/<name>/SKILL.md`（需含 `name` / `description` YAML frontmatter）的团队 skill，会自动分发到以下目录，统一命名为 `org-<name>`。各端共用同一份标准格式和配套脚本，无需转换。
+
+| Agent | 团队 skills 目录 | 分发条件 |
+|---|---|---|
+| Claude Code | `~/.claude/skills/` | 默认分发，兼容已有行为 |
+| Codex | `~/.codex/skills/` | `.codex` 中有 `config.toml` / `auth.json` / `sessions` / `history.jsonl` / `logs` |
+| Cursor 桌面版 / CLI | `~/.cursor/skills/` | `.cursor` 中有 `cli-config.json` / `ide_state.json` / `extensions` / `projects` |
+| Hermes | `$HERMES_HOME/skills/`，默认 `~/.hermes/skills/` | 实例目录中有 `config.yaml` / `.env` / `sessions` / `state.db` |
+
+每个同步周期重新检测安装状态；仅有 knowbase 创建的规则、hooks、plugins、skills 不算安装证据。首次由 knowbase 创建、且尚未被用户修改的 Hermes `config.yaml` 也不算独立安装证据，卸载时会清理。装上新客户端后 skills 下周期自动下发，上下文接入需重新执行 init。源变了就更新，删了就撤下，新增就装上；`status` 按客户端展示，`--no-skills` 对全部客户端生效。
 
 ```
 知识库                              本机（每个成员）
 skills/deploy/SKILL.md      ──►    ~/.claude/skills/org-deploy/SKILL.md   (name: org-deploy)
 skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    (装了 Codex 时)
+skills/deploy/SKILL.md      ──►    ~/.cursor/skills/org-deploy/SKILL.md   (装了 Cursor 时)
+skills/deploy/SKILL.md      ──►    ~/.hermes/skills/org-deploy/SKILL.md   (装了 Hermes 时)
 ```
 
 几条容易搞混的地方需要明确：
 
 - **单向下发，托管副本是只读产物**：在 `~/.claude/skills/org-*/` 里手改**不会**回写知识库，下个同步周期会被静默覆盖（实现上是给每个副本单独算一份内容哈希，一旦跟落盘时的哈希对不上就判定「本机被动过」，触发重装）。想改一个团队 skill，去改知识库里的 `skills/` 目录，改动会通过正常的知识库同步扩散给所有人。
 - **删掉 `~/.claude/skills/org-xxx/` 目录不是退订**：下个周期它会被原样重新分发——这与「删掉 agent 提示词里的托管区块就不再刷新」刻意不同，因为 skill 目录一删连托管标记都没了，没有地方记住「这个人拒绝过」。真要关闭，用 `knowbase init --no-skills` 接入，或在 `~/.config/knowbase/config.json` 里把 `"skills"` 设为 `false`。
-- **同名保护**：如果你本机的 `~/.claude/skills/org-x` 不是 knowbase 建的（目录里没有 `.knowbase.json` 托管标记），一律不会被覆盖或删除。`knowbase status` 会把这种情况列成一条提示，并以非零退出码提醒你——通常改个名字，下一周期就能收到团队版。Codex 侧同理。
+- **同名保护**：如果你本机的 `~/.claude/skills/org-x` 不是 knowbase 建的（目录里没有 `.knowbase.json` 托管标记），一律不会被覆盖或删除。`knowbase status` 会把这种情况列成一条提示，并以非零退出码提醒你——通常改个名字，下一周期就能收到团队版。Codex / Cursor / Hermes 侧同理。
 - **`name` 与 `description` 都是硬要求**：缺任一字段（或 `description` 为空）的 skill 会被跳过、不分发，`knowbase status` 里会列出原因。Claude Code 靠 `description` 判断何时触发一个 skill，缺了它等于分发一个装死的 skill，而团队会以为流程已经生效。
 - `knowbase uninstall` 会清掉所有带托管标记的团队 skill 副本，你自己的 skill（无论是否叫 `org-*`）原样保留。
 
@@ -167,6 +188,11 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 ~/.codex/AGENTS.md                    # 同上
 ~/.claude/skills/org-<name>/          # 知识库 skills/<name>/ 的托管副本（uninstall 移除）
 ~/.codex/skills/org-<name>/           # 同上，装了 Codex 时（uninstall 移除）
+~/.cursor/knowbase/                  # Cursor 托管规则插件和 workspaceOpen 脚本
+~/.cursor/hooks.json                 # 仅增删 knowbase 的 hook 注册项
+~/.cursor/skills/org-<name>/          # Cursor 桌面版 / CLI 团队 skills
+~/.hermes/plugins/knowbase-context/  # Hermes 托管上下文插件
+~/.hermes/skills/org-<name>/          # Hermes 团队 skills（支持 HERMES_HOME）
 ```
 
 ## 升级
@@ -177,6 +203,12 @@ skills/deploy/SKILL.md      ──►    ~/.codex/skills/org-deploy/SKILL.md    
 
 - `KNOWBASE_SKIP_AUTOSTART=1`：`init` 时跳过自启注册（用于 CI / 容器 / 手动托管守护进程的场景）。
 - `KNOWBASE_QUIET_MS` / `KNOWBASE_MAXWAIT_MS`：调整文件监听防抖的静默期 / 最大等待（毫秒，默认 3000 / 30000）。
+
+## Docker 沙盒测试
+
+参见 [`test/sandbox/README.md`](test/sandbox/README.md)。测试使用独立容器 HOME，不挂载本机 agent 配置；完整回归以普通用户运行，避免 root 绕过只读权限导致假阳性。
+
+Hermes 可用 OpenAI 兼容接口（如豆包）做真实模型验收。Cursor CLI 仍需 Cursor 服务的有效凭据，不能将普通 Chat Completions 地址直接替换为 Cursor 后端。
 
 ## License
 

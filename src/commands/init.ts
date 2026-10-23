@@ -12,6 +12,7 @@ import * as git from "../git.js";
 import { isMirrorMode, setMirrorLock } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
+import { hermesHomeDir } from "../agent-installations.js";
 import { syncSkills, summarizeByTool } from "../skills-sync.js";
 
 export interface InitOptions {
@@ -153,6 +154,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     branch,
     agentConfig: opts.agentConfig !== false,
     skills: opts.skills !== false,
+    hermesHome: hermesHomeDir(),
   };
   saveConfig(cfg);
   console.log("• 已保存配置");
@@ -174,9 +176,13 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("• 已跳过 AI agent 全局提示词配置（--no-agent-config）");
   } else {
     try {
-      const changes = syncAgentConfig(dir);
+      const changes = syncAgentConfig(dir, undefined, { hermesHome: cfg.hermesHome });
       for (const c of changes) {
         if (c.action === "skipped") {
+          if (c.reason) {
+            console.warn(`⚠ ${c.name} 知识库上下文未更新：${c.reason}`);
+            continue;
+          }
           console.warn(
             `⚠ ${c.name} 全局提示词未更新：${c.file} 里的 knowbase 区块不完整` +
               `（有 KNOWBASE:START 但缺 KNOWBASE:END）。`
@@ -206,7 +212,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("• 已跳过团队 skills 分发（--no-skills）");
   } else {
     try {
-      const changes = syncSkills(dir);
+      const changes = syncSkills(dir, undefined, cfg.hermesHome);
       const done = changes.filter(
         (c) => c.action === "created" || c.action === "updated"
       );
@@ -238,7 +244,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     }
   }
 
-  console.log("\n✓ 接入完成。你的 Claude Code / Codex 已知道知识库位置。");
+  console.log("\n✓ 接入完成。支持 Claude Code / Codex / Cursor（桌面版与 CLI）/ Hermes；具体配置结果见上方。");
   console.log("  运行 `knowbase status` 查看健康度。");
   logger.log(`init 完成：dir=${dir} url=${url} branch=${branch}`);
   return 0;

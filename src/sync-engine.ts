@@ -190,9 +190,13 @@ export function refreshAgentPrompts(
 ): void {
   if (cfg.agentConfig === false) return;
   try {
-    const changes = syncAgentConfig(cfg.dir, home, { onlyExisting: true });
+    const changes = syncAgentConfig(cfg.dir, home, { onlyExisting: true, hermesHome: cfg.hermesHome });
     for (const c of changes) {
       if (c.action !== "skipped") continue;
+      if (c.reason) {
+        logger.log(`${c.name} 知识库上下文已跳过刷新：${c.reason}`);
+        continue;
+      }
       logger.log(
         `${c.name} 提示词 ${c.file} 中区块结束标记缺失，已跳过刷新` +
           `（强行写入会删掉标记之后的用户内容）；请手动检查该文件`
@@ -234,7 +238,7 @@ export function refreshOrgSkills(
 ): void {
   if (cfg.skills === false) return;
   try {
-    const changes = syncSkills(cfg.dir, home);
+    const changes = syncSkills(cfg.dir, home, cfg.hermesHome);
     const done = changes.filter(
       (c) => c.action === "created" || c.action === "updated" || c.action === "removed"
     );

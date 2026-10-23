@@ -13,6 +13,7 @@ import * as git from "../git.js";
 import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
 import { readKbTree, TREE_MAX_BYTES } from "../agent-config.js";
+import { additionalAgentConfigStatus } from "../agent-integrations.js";
 import {
   planSkills,
   readExistingTargets,
@@ -140,6 +141,13 @@ export function cmdStatus(): number {
     }
   }
 
+  if (cfg.agentConfig !== false) {
+    for (const s of additionalAgentConfigStatus(undefined, cfg.hermesHome)) {
+      console.log(`知识库上下文（${s.name}）：${s.state}`);
+      if (s.error) anomalies.push(`${s.name} 知识库上下文配置异常：${s.error}`);
+    }
+  }
+
   // 团队 skills（同样默认静默运行，必须给出可见性）
   console.log("");
   if (cfg.skills === false) {
@@ -152,7 +160,7 @@ export function cmdStatus(): number {
     // status 存在的唯一理由就是给这套静默机制提供可见性，判定分叉就等于没有。
     // planSkills 是纯函数、零 fs 写入，status 保持只读这条约束不受影响。
     const { sources, invalid, protectedTargets } = readSkillSources(cfg.dir);
-    const targets = skillTargets();
+    const targets = skillTargets(undefined, cfg.hermesHome);
     const perTarget = targets.map((t) => ({ t, existing: readExistingTargets(t.dir) }));
     // invalid.length === 0 是必要条件：invalid 非空说明 skills/ 目录确实存在、
     // 只是里面有坏源（如缺 description），这不是「还没有团队 skill」的 day one

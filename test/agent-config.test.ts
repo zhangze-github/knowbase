@@ -148,6 +148,28 @@ describe("目录树读取", () => {
     expect(r.files).toBe(1);
   });
 
+  it("排除仓库根 skills 整棵子树及统计，保留业务文档中同名目录", () => {
+    fs.mkdirSync(path.join(kb, "skills/deploy/references"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "skills/deploy/SKILL.md"), "team skill");
+    fs.writeFileSync(path.join(kb, "skills/deploy/references/guide.md"), "reference");
+    fs.mkdirSync(path.join(kb, "项目/skills"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "项目/skills/培训.md"), "business knowledge");
+    fs.writeFileSync(path.join(kb, "项目/说明.md"), "knowledge");
+
+    const r = readKbTree(kb);
+    expect(r.text).toBe("项目/\n  skills/\n    培训.md\n  说明.md");
+    expect(r.files).toBe(2);
+    expect(r.hidden).toBe(0);
+    expect(r.bytes).toBe(Buffer.byteLength("项目/\n  skills/\n    培训.md\n  说明.md", "utf8"));
+    expect(r.truncated).toBe(false);
+  });
+
+  it("仅有团队 skills 的仓库按空知识库处理，不占用目录树预算", () => {
+    fs.mkdirSync(path.join(kb, "skills/deploy"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "skills/deploy/SKILL.md"), "team skill");
+    expect(readKbTree(kb)).toEqual({ text: null, files: 0, hidden: 0, bytes: 0, truncated: false });
+  });
+
   it("空目录 → text 为 null", () => {
     const r = readKbTree(kb);
     expect(r.text).toBe(null);

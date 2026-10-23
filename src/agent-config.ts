@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
+import { syncAdditionalAgentConfig, uninstallAdditionalAgentConfig } from "./agent-integrations.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -98,7 +99,8 @@ export const MIN_HIDDEN = 3;
  * 递归列出一层目录下的行：目录先于文件、各自按默认字符串排序，保证
  * 跨平台（不同文件系统的 readdir 顺序不保证一致）确定性输出。
  * 跳过点开头的条目（.git、.knowbase-mirror.json、.gitignore、
- * .knowbase-pause 等 knowbase/git 自身的管理文件）与 node_modules——
+ * .knowbase-pause 等 knowbase/git 自身的管理文件）、node_modules 与仓库根 skills/——
+ * 团队 skills 由客户端按需发现，不能把其目录和配套文件当作知识目录注入。
  * 这些对 agent 定位知识没有意义，混进树里只会稀释信噪比。
  * 任意一层 readdir 失败（目录不存在、权限问题等）当作空，不向上抛。
  */
@@ -114,7 +116,10 @@ function listTree(
   } catch {
     return;
   }
-  const visible = entries.filter((e) => !e.name.startsWith(".") && e.name !== "node_modules");
+  const visible = entries.filter((e) =>
+    !e.name.startsWith(".") && e.name !== "node_modules" &&
+    !(indent === "" && e.name === SKILLS_SUBDIR)
+  );
   const dirs = visible.filter((e) => e.isDirectory()).map((e) => e.name).sort();
   const files = visible.filter((e) => !e.isDirectory()).map((e) => e.name).sort();
   for (const name of dirs) {
@@ -181,7 +186,7 @@ export function buildBlock(dir: string, tree?: string | null): string {
   // 段落，且与 status 「暂无文件」的口径打架。
   const hasTree = tree != null && tree.trim() !== "";
   const treeSection = hasTree
-    ? `### 知识库目录树（全部文件，由 knowbase 自动生成）
+    ? `### 知识库目录树（由 knowbase 自动生成）
 
 ${tree}`
     : `知识库暂无文件，需要时直接 grep 全库。`;
@@ -257,10 +262,12 @@ export interface AgentConfigChange {
    * skipped=区块残缺无法安全写入，已放弃
    */
   action: "created" | "updated" | "unchanged" | "skipped";
+  reason?: string;
 }
 
 /** syncAgentConfig 的可选行为。 */
 export interface SyncAgentConfigOptions {
+  hermesHome?: string;
   /**
    * 只刷新已存在的区块，绝不创建。守护进程用；init 不用。
    * 用户手动删掉区块、或当年用 --no-agent-config 接入（配置里没有该键、被
@@ -298,7 +305,7 @@ function resolveWriteTarget(file: string): string {
  * 这些是用户的个人提示词文件，改为每个同步周期都可能触发的周期性写入后，
  * 进程在错误时机被 kill 会留下截断的 CLAUDE.md，损坏代价高。
  */
-function writeFileAtomic(file: string, content: string): void {
+export function writeFileAtomic(file: string, content: string): void {
   // 先解析真实路径：dotfiles 仓库常把 ~/.claude/CLAUDE.md 做成指向仓库副本的
   // 软链。renameSync 不跟随软链，会 unlink 掉软链、换上一个普通文件——仓库副本
   // 从此静默失联，用户之后在仓库里的手改对 agent 完全不可见，且毫无提示。
@@ -359,18 +366,19 @@ export function syncAgentConfig(
       action: existed ? "updated" : "created",
     });
   }
-  return changes;
+  return [...changes, ...syncAdditionalAgentConfig(block, home, opts.onlyExisting, opts.hermesHome)];
 }
 
 export interface AgentConfigRemoval {
   name: string;
   file: string;
   removed: boolean;
+  error?: string;
 }
 
 /** uninstall 时调用：从所有 agent 全局提示词文件移除托管区块。 */
 export function uninstallAgentConfig(
-  home: string = os.homedir()
+  home: string = os.homedir(), hermesHome?: string
 ): AgentConfigRemoval[] {
   const removals: AgentConfigRemoval[] = [];
   for (const t of agentTargets(home)) {
@@ -383,5 +391,5 @@ export function uninstallAgentConfig(
     if (removed) fs.writeFileSync(t.file, content, "utf8");
     removals.push({ name: t.name, file: t.file, removed });
   }
-  return removals;
+  return [...removals, ...uninstallAdditionalAgentConfig(home, hermesHome)];
 }

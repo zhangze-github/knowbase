@@ -15,9 +15,12 @@ import { isMirrorMode, setMirrorLock } from "../mirror.js";
 /** `knowbase uninstall`：注销自启、停止守护进程、保留本地文件夹。 */
 export function cmdUninstall(): number {
   let dir: string | null = null;
+  let hermesHome: string | undefined;
   if (configExists()) {
     try {
-      dir = loadConfig().dir;
+      const cfg = loadConfig();
+      dir = cfg.dir;
+      hermesHome = cfg.hermesHome;
     } catch {
       dir = null;
     }
@@ -54,9 +57,10 @@ export function cmdUninstall(): number {
 
   // 移除写入各 AI agent 全局提示词的托管区块
   try {
-    const removals = uninstallAgentConfig();
+    const removals = uninstallAgentConfig(undefined, hermesHome);
     for (const r of removals) {
       if (r.removed) console.log(`• 已从 ${r.name} 全局提示词移除知识库区块：${r.file}`);
+      if (r.error) console.warn(`⚠ ${r.name} 知识库上下文未移除：${r.file}：${r.error}`);
     }
   } catch (e) {
     console.warn(`⚠ 移除 agent 提示词区块时出错：${e instanceof Error ? e.message : String(e)}`);
@@ -64,7 +68,7 @@ export function cmdUninstall(): number {
 
   // 移除分发到各生效目标的团队 skills 副本（无托管标记的目录一律不碰）
   try {
-    const removals = uninstallSkills();
+    const removals = uninstallSkills(undefined, hermesHome);
     const removed = removals.filter((r) => r.removed);
     if (removed.length > 0) {
       const groups = new Map<string, string[]>();

@@ -1,0 +1,10 @@
+ARG AGENT_IMAGE
+FROM ${AGENT_IMAGE}
+WORKDIR /workspace
+COPY --from=knowbase-agent-test:local /workspace/dist ./dist
+COPY --from=knowbase-agent-test:local /workspace/node_modules ./node_modules
+COPY --from=knowbase-agent-test:local /workspace/package.json ./package.json
+COPY test/sandbox ./test/sandbox
+ENV HOME=/tmp/knowbase-home HERMES_HOME=/tmp/knowbase-home/.hermes KNOWBASE_SKIP_AUTOSTART=1
+ENTRYPOINT []
+CMD ["sh", "-c", "node test/sandbox/prepare-agents.mjs && cd /opt/hermes && PYTHONPATH=/opt/hermes /opt/hermes/.venv/bin/python /workspace/test/sandbox/hermes-loader.py"]
