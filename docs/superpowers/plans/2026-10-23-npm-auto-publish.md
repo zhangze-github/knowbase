@@ -28,7 +28,7 @@
 - [x] 写版本决策与 registry 错误测试，验证 RED。
 - [x] 实现检查脚本与主分支工作流、发布文档，验证 GREEN。
 - [x] Docker 普通用户运行全量测试与构建，审阅 diff。
-- [ ] 配置 npm trusted publisher，提交并快进 main，观察首次工作流通过且跳过已发布版本。
+- [x] 配置 npm trusted publisher，提交并快进 main，观察首次工作流通过且跳过已发布版本。
 
 ## 验证记录
 - RED：版本检查模块尚不存在时定向测试失败。
@@ -36,4 +36,6 @@
 - Docker：普通用户全量 17 文件 / 287 项测试通过；TypeScript 构建通过。
 - 独立审阅：未发现需修复问题；工作流先构建再运行依赖 dist 的 CLI 测试。
 - npm trusted publisher 已创建：`zhangze-github/knowbase` / `publish.yml`，允许 publish。
-- main 已快进到包含 1.1.0 功能与本工作流的提交；首次运行记录待 GitHub 生成。
+- main 已快进到包含 1.1.0 功能与本工作流的提交。
+- 首次 GitHub Actions push 验收成功：构建、287 测试、pack 检查通过，OIDC 发布步骤因版本已存在而跳过。运行：https://github.com/zhangze-github/knowbase/actions/runs/39955004127 。
+- 新版本真正写入 registry 的 OIDC 发布将在下一次版本递增时执行；本次未为测试另发一个 npm 版本。
