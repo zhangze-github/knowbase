@@ -56,6 +56,10 @@ export function exporterLogPath(): string {
   return path.join(configDir(), "exporter.log");
 }
 
+export function exporterHealthPath(): string {
+  return process.env.KNOWBASE_EXPORTER_HEALTH_FILE || path.join(configDir(), "exporter-health.json");
+}
+
 /**
  * launchd/systemd 重定向守护进程 stdout/stderr 的独立文件。
  * 不能与 logPath() 共用：Logger 用 rename 轮转，服务管理器持有的旧 fd

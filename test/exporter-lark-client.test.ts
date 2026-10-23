@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { LarkClient } from "../src/exporter/lark-client.js";
 
 type Route = (url: string, init?: RequestInit) => { status?: number; headers?: Record<string, string>; body: unknown };
@@ -27,6 +29,71 @@ function client(route: Route) {
 const TOKEN_BODY = { code: 0, tenant_access_token: "tok1", expire: 7200 };
 
 describe("LarkClient", () => {
+  it.each([
+    ["token", "headers"],
+    ["token", "body"],
+    ["API", "headers"],
+    ["API", "body"],
+  ] as const)("bounds stalled %s %s and closes the HTTP connection", async (stage, stall) => {
+    let markClosed!: (closedBeforeResponseEnded: boolean) => void;
+    const connectionClosed = new Promise<boolean>((resolve) => { markClosed = resolve; });
+    const server = createServer((req, res) => {
+      const isToken = req.url?.includes("tenant_access_token");
+      if ((stage === "token") === isToken) {
+        res.on("close", () => { markClosed(!res.writableEnded); });
+        if (stall === "body") {
+          res.writeHead(200, { "Content-Type": "application/json" });
+          res.write('{"code":0,');
+        }
+        return;
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(TOKEN_BODY));
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    let guard: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const c = new LarkClient({
+        appId: "private-app-id", appSecret: "private-app-secret",
+        endpoint: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        requestTimeoutMs: 100,
+      });
+      const operation = stage === "token" ? c.tenantToken() : c.request("GET", "/stalled");
+      const bounded = Promise.race([
+        operation,
+        new Promise<never>((_, reject) => {
+          guard = setTimeout(() => reject(new Error("request did not stop within 1s")), 1000);
+        }),
+      ]);
+      const error = await bounded.catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(/飞书请求超时.*100ms/);
+      expect((error as Error).message).not.toMatch(/private-app-id|private-app-secret/);
+      await expect(Promise.race([
+        connectionClosed,
+        new Promise<never>((_, reject) => {
+          clearTimeout(guard);
+          guard = setTimeout(() => reject(new Error("HTTP connection was not aborted")), 1000);
+        }),
+      ])).resolves.toBe(true);
+    } finally {
+      clearTimeout(guard);
+      server.closeAllConnections();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("stops retrying after five rate-limit retries", async () => {
+    let hits = 0;
+    const { c } = client((u) => {
+      if (u.includes("tenant_access_token")) return { body: TOKEN_BODY };
+      hits++;
+      return { status: 429, body: { code: 99991400 } };
+    });
+    await expect(c.request("GET", "/limited")).rejects.toThrow(/限流重试 5 次仍失败/);
+    expect(hits).toBe(6);
+  });
+
   it("token 缓存：两次请求只取一次 token", async () => {
     const { c, calls } = client((u) => {
       if (u.includes("tenant_access_token")) return { body: TOKEN_BODY };

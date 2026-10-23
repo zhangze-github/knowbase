@@ -49,32 +49,21 @@
 在本机运行 exporter 进行单次验收，确保整个流程可用。
 
 `--repo` 必须指向一个**已 clone 的镜像仓库根目录**本身（exporter 会校验，指向非仓库目录
-或仓库内的子目录都会直接报错退出）。正式使用时应 `git clone` 你在步骤④准备好的真实镜像
-仓库；这里的冒烟验证图省事，先用 `git init` 建一个空仓库占位即可：
+或仓库内的子目录都会直接报错退出）。冒烟验证也需 clone 步骤④准备好的真实镜像仓库，
+并具有推送权限；每轮导出前会先拉取远端，只有 `git init`、没有 `origin` 的目录不能运行：
 
 ```bash
 export KNOWBASE_LARK_APP_ID="your-app-id"
 export KNOWBASE_LARK_APP_SECRET="your-app-secret"
 export KNOWBASE_LARK_SPACE="https://your-org.feishu.cn/wiki/space/your-space-id"
 
-# 冒烟用：先建一个空仓库占位（正式部署请改成 git clone 真实镜像仓库）
-git init ~/temp-repo
+# 替换为步骤④准备好的镜像仓库地址；不要与正在运行的 exporter 同时写入同一分支
+git clone git@github.com:your-org/knowledge-base.git ~/temp-repo
 
 # 初次导出，--once 表示单次运行后退出
 knowbase exporter \
   --repo ~/temp-repo \
   --space "$KNOWBASE_LARK_SPACE" \
-  --once
-```
-
-不想设环境变量时，全部参数也可以只通过启动命令传入（注意 secret 会留在 shell history）：
-
-```bash
-knowbase exporter \
-  --repo ~/temp-repo \
-  --space "https://your-org.feishu.cn/wiki/space/your-space-id" \
-  --app-id "your-app-id" \
-  --app-secret "your-app-secret" \
   --once
 ```
 
@@ -119,6 +108,9 @@ KNOWBASE_LARK_SPACE=https://your-org.feishu.cn/wiki/space/your-space-id
 KNOWBASE_MIRROR_REPO_URL=git@github.com:your-org/knowledge-base.git
 ```
 
+凭证仅通过环境文件或 Git credential helper 提供；不要放进命令行、额外参数或仓库 URL。
+运行前执行 `chmod 600 ~/.knowbase-exporter.env`。
+
 **第二步**：准备 SSH 凭证（如果使用 SSH）
 
 如果仓库 URL 是 SSH 形式（`git@github.com:...`），需要将 SSH 私钥挂进容器。
@@ -143,7 +135,7 @@ ssh-keyscan github.com >> ~/knowbase-exporter-ssh/known_hosts
 **第三步**：构建 Docker 镜像
 
 ```bash
-docker build -t knowbase-exporter:latest deploy/exporter/
+docker build --build-arg KNOWBASE_VERSION=1.1.2 -t knowbase-exporter:1.1.2 deploy/exporter/
 ```
 
 **第四步**：运行 Docker 容器
@@ -155,7 +147,7 @@ docker run -d \
   --env-file ~/.knowbase-exporter.env \
   -v knowbase-repo:/data/repo \
   -v ~/knowbase-exporter-ssh:/root/.ssh:ro \
-  knowbase-exporter:latest
+  knowbase-exporter:1.1.2
 ```
 
 或使用 docker-compose（创建 `docker-compose.yml`）：
@@ -164,7 +156,10 @@ docker run -d \
 version: '3.8'
 services:
   exporter:
-    build: .
+    build:
+      context: ./deploy/exporter
+      args:
+        KNOWBASE_VERSION: "1.1.2"
     restart: always
     environment:
       - KNOWBASE_LARK_APP_ID=${KNOWBASE_LARK_APP_ID}
@@ -183,6 +178,36 @@ volumes:
 ```bash
 docker-compose up -d
 ```
+
+Dockerfile 默认安装 `knowbase@1.1.2`，升级时显式修改构建参数和镜像标签；不会自动安装 npm latest。
+
+**健康检查与单写者约束**
+
+镜像内置健康探针，每 30 秒读取 `$XDG_CONFIG_HOME/knowbase/exporter-health.json`，未设置
+XDG 时使用 `$HOME/.config/knowbase/exporter-health.json`。也可用
+`KNOWBASE_EXPORTER_HEALTH_FILE` 指定路径。状态包含 `started_at`、`last_cycle_at`、
+`last_success_at`、`last_error`；每次进程启动重建状态，只有无错误且已成功推送的周期推进
+`last_success_at`。文件缺失/损坏、最近周期报错、启动后尚未成功推送，或最后成功推送超过
+`KNOWBASE_EXPORTER_HEALTH_MAX_AGE_SECONDS`（默认 600 秒）时，探针失败。
+同步间隔或正常周期耗时较长时，相应增大该值。
+
+通过 `docker inspect --format '{{json .State.Health}}' knowbase-exporter` 查看结果。
+Docker 的 `unhealthy` 状态只用于诊断，`--restart always` **不会因此重启**仍在运行的容器；
+探针不会终止进程，也未配置任何告警通知。需要通知时，另行接入监控系统。
+
+入口在首次 clone 前锁定 `/data/repo` 的目录 inode，并持锁直到 exporter 退出。
+共享同一 Docker volume 的第二个实例会直接报错退出；无需在空目录中放置会阻止 clone 的锁文件。
+该锁不协调不同仓库副本、不同主机或远端写入者，部署时仍须保证**每个镜像分支只有一个 exporter**。
+运行中不要删除或替换被锁的目录。
+
+初次 clone 默认限制为 120 秒（`KNOWBASE_EXPORTER_CLONE_TIMEOUT_SECONDS` 可调整），超时先
+发送 TERM，10 秒后仍未退出则 KILL。后续 Git fetch/merge/push 各限制 60 秒；HTTP 单次请求
+（含 token 获取与响应体读取）默认 30 秒，超时中止请求。429 最多重试 5 次，重试等待仍按
+服务端 `x-ogw-ratelimit-reset` 执行，不能把 30 秒理解为整个同步周期的上限。
+
+已有本地提交和远端提交分叉时，保留仓库卷并正常重启：exporter 会 fetch 后 merge，再推送，
+无需删除本地提交或 force push。若确有内容冲突，先停掉 exporter，检查日志并在保留本地工作与
+提交的前提下人工解决冲突、提交后重启；不要用 reset --hard 清理未核实的改动。
 
 #### 方案 B：systemd 服务（Linux）
 
@@ -297,16 +322,19 @@ sudo journalctl -u knowbase-exporter -n 50 # 最近 50 行
 
 ## 环境变量参考
 
-> 全部参数也可以只通过启动命令传入：凭证对应 `--app-id` / `--app-secret` / `--endpoint` 命令行参数（命令行优先于环境变量）。注意 `--app-secret` 走命令行会留在 shell history / `ps` 输出中，长驻部署（Docker/systemd）仍推荐环境变量。
+凭证使用环境变量或受限环境文件，避免在命令行与进程列表中暴露 secret。
 
 | 变量 | 是否必需 | 说明 |
 |------|---------|------|
-| `KNOWBASE_LARK_APP_ID` | 是* | 飞书应用 App ID（*或用 `--app-id` 传入） |
-| `KNOWBASE_LARK_APP_SECRET` | 是* | 飞书应用 App Secret（*或用 `--app-secret` 传入） |
+| `KNOWBASE_LARK_APP_ID` | 是 | 飞书应用 App ID |
+| `KNOWBASE_LARK_APP_SECRET` | 是 | 飞书应用 App Secret |
 | `KNOWBASE_LARK_SPACE` | 是 | 知识库 space URL（如 `https://org.feishu.cn/wiki/space/123`） |
 | `KNOWBASE_MIRROR_REPO_URL` | 仅初次 | Git 仓库 URL，首次 clone 时必需；之后可省略 |
 | `KNOWBASE_EXPORTER_EXTRA_ARGS` | 否 | 传递给 `knowbase exporter` 的额外参数（如 `--interval 300` 覆盖默认同步间隔） |
 | `KNOWBASE_LARK_ENDPOINT` | 否 | 飞书 API 端点，不指定时默认使用国内 |
+| `KNOWBASE_EXPORTER_HEALTH_FILE` | 否 | exporter 状态文件和 Docker 探针共用的路径 |
+| `KNOWBASE_EXPORTER_HEALTH_MAX_AGE_SECONDS` | 否 | 探针允许的最后成功推送年龄，默认 600 秒 |
+| `KNOWBASE_EXPORTER_CLONE_TIMEOUT_SECONDS` | 否 | Docker 初次 clone 超时，正整数秒，默认 120 |
 
 ---
 

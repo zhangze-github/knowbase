@@ -14,9 +14,12 @@ export interface LarkClientOpts {
   endpoint?: string;
   fetchFn?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  /** Includes receiving headers and consuming the response body. */
+  requestTimeoutMs?: number;
 }
 
 const DEFAULT_ENDPOINT = "https://open.feishu.cn";
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const MAX_RETRIES = 5;
 /** token 提前刷新窗口：飞书 expire 通常 7200s，提前 5 分钟避免边界失效。 */
 const TOKEN_SLACK_MS = 300 * 1000;
@@ -37,17 +40,45 @@ export class LarkClient {
     return (this.opts.sleep ?? ((m) => new Promise((r) => setTimeout(r, m))))(ms);
   }
 
+  private async fetchJson<T>(apiPath: string, init: RequestInit, qs = ""): Promise<{ res: Response; body: T }> {
+    const timeoutMs = this.opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        // Keep credentials, query values and upstream error details out of the timeout error.
+        const error = new Error(`飞书请求超时（${timeoutMs}ms）：${apiPath}`);
+        controller.abort(error);
+        reject(error);
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([
+        (async () => {
+          const res = await this.fetchFn()(`${this.opts.endpoint}${apiPath}${qs}`, {
+            ...init,
+            signal: controller.signal,
+          });
+          const body = await res.json() as T;
+          return { res, body };
+        })(),
+        deadline,
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   async tenantToken(): Promise<string> {
     if (this.token && Date.now() < this.tokenExpireAt) return this.token;
-    const res = await this.fetchFn()(
-      `${this.opts.endpoint}/open-apis/auth/v3/tenant_access_token/internal`,
+    const { body } = await this.fetchJson<{ code: number; msg?: string; tenant_access_token?: string; expire?: number }>(
+      "/open-apis/auth/v3/tenant_access_token/internal",
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ app_id: this.opts.appId, app_secret: this.opts.appSecret }),
       }
     );
-    const body = (await res.json()) as { code: number; msg?: string; tenant_access_token?: string; expire?: number };
     if (body.code !== 0 || !body.tenant_access_token) {
       throw new Error(`获取 tenant token 失败：code=${body.code} ${body.msg ?? ""}`);
     }
@@ -69,15 +100,14 @@ export class LarkClient {
     const qs = query ? `?${new URLSearchParams(query)}` : "";
     for (let attempt = 0; ; attempt++) {
       const token = await this.tenantToken();
-      const res = await this.fetchFn()(`${this.opts.endpoint}${apiPath}${qs}`, {
+      const { res, body } = await this.fetchJson<{ code: number; msg?: string; data?: unknown }>(apiPath, {
         method,
         headers: {
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
         body: reqBody === undefined ? undefined : JSON.stringify(reqBody),
-      });
-      const body = (await res.json()) as { code: number; msg?: string; data?: unknown };
+      }, qs);
       if (res.status === 429 || body.code === 99991400) {
         if (attempt >= MAX_RETRIES) throw new Error(`飞书限流重试 ${MAX_RETRIES} 次仍失败：${apiPath}`);
         const reset = parseInt(res.headers.get("x-ogw-ratelimit-reset") ?? "", 10);

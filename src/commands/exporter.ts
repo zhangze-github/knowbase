@@ -1,8 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DEFAULT_BRANCH, Logger, exporterLogPath } from "../config.js";
+import { DEFAULT_BRANCH, Logger, exporterLogPath, exporterHealthPath } from "../config.js";
 import * as git from "../git.js";
 import { LarkClient } from "../exporter/lark-client.js";
+import { ExporterHealth } from "../exporter/health.js";
 import { runExportOnce, runExporterDaemon, ExporterConfig } from "../exporter/exporter.js";
 
 const DEFAULT_EXPORTER_INTERVAL = 120;
@@ -251,8 +252,10 @@ export async function cmdExporter(opts: Record<string, string | boolean | undefi
   console.log(`• space: ${cfg.spaceId}  host: ${cfg.host}${cfg.rootToken ? `  root: ${cfg.rootToken}` : ""}`);
   console.log(`• branch: ${cfg.branch}  interval: ${parsed.interval}s  模式: ${parsed.once ? "once" : "daemon"}`);
 
+  const health = new ExporterHealth(exporterHealthPath());
   if (parsed.once) {
     const result = await runExportOnce(cfg, { client, logger });
+    health.record(result);
     logger.log(
       `exporter(once): exported=${result.exported} moved=${result.moved} removed=${result.removed} ` +
         `pushed=${result.pushed}${result.error ? ` error=${result.error}` : ""}`
@@ -275,6 +278,13 @@ export async function cmdExporter(opts: Record<string, string | boolean | undefi
     return 0;
   }
 
-  await runExporterDaemon(cfg, { client, logger }, { intervalSec: parsed.interval });
+  await runExporterDaemon(cfg, { client, logger }, {
+    intervalSec: parsed.interval,
+    onCycle: (result, summary) => {
+      health.record(result);
+      if (result.error) console.error(summary);
+      else console.log(summary);
+    },
+  });
   return 0;
 }

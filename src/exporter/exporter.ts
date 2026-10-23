@@ -384,6 +384,8 @@ export async function runExportOnce(
 export interface DaemonOpts {
   /** 轮询间隔，单位秒。 */
   intervalSec: number;
+  /** CLI records publication health and exposes each cycle in container logs. */
+  onCycle?: (result: ExportResult, summary: string) => void;
   /** 测试注入：默认真实 setTimeout。 */
   sleep?: (ms: number) => Promise<void>;
   /** 测试用：跑满这么多轮后 return（生产不传，无限循环）。 */
@@ -428,10 +430,11 @@ export async function runExporterDaemon(
       result = { exported: 0, moved: 0, removed: 0, committed: false, pushed: false, error: String(e) };
       logger.log(`exporter: 守护循环捕获未预期异常（不应发生，runExportOnce 应已兜底）: ${String(e)}`);
     }
-    logger.log(
+    const summary =
       `exporter: 周期完成 exported=${result.exported} moved=${result.moved} removed=${result.removed} ` +
-        `pushed=${result.pushed}${result.error ? ` error=${result.error}` : ""}`
-    );
+      `pushed=${result.pushed}${result.error ? ` error=${result.error}` : ""}`;
+    logger.log(summary);
+    opts.onCycle?.(result, summary);
 
     cycle++;
     if (opts.maxCycles !== undefined && cycle >= opts.maxCycles) return;

@@ -4,10 +4,20 @@ set -e
 
 REPO_DIR="/data/repo"
 SPACE="${KNOWBASE_LARK_SPACE:-}"
+CLONE_TIMEOUT="${KNOWBASE_EXPORTER_CLONE_TIMEOUT_SECONDS:-120}"
 
 # Validate required environment variables
-if [ -z "$KNOWBASE_LARK_SPACE" ]; then
+if [ -z "$SPACE" ]; then
   echo "Error: KNOWBASE_LARK_SPACE environment variable is required" >&2
+  exit 1
+fi
+
+# Lock the directory inode: a lockfile inside it would prevent the first clone.
+# fd 9 survives exec, keeping the lock for the entire exporter process lifetime.
+mkdir -p "$REPO_DIR"
+exec 9<"$REPO_DIR"
+if ! flock -n 9; then
+  echo "Error: another exporter holds the repository directory lock" >&2
   exit 1
 fi
 
@@ -18,8 +28,14 @@ if [ ! -d "$REPO_DIR/.git" ]; then
     exit 1
   fi
 
-  echo "Cloning repository from $KNOWBASE_MIRROR_REPO_URL..."
-  git clone "$KNOWBASE_MIRROR_REPO_URL" "$REPO_DIR"
+  if ! [[ "$CLONE_TIMEOUT" =~ ^[1-9][0-9]*$ ]]; then
+    echo "Error: KNOWBASE_EXPORTER_CLONE_TIMEOUT_SECONDS must be a positive integer" >&2
+    exit 1
+  fi
+  export GIT_TERMINAL_PROMPT=0
+  export GIT_SSH_COMMAND="${GIT_SSH_COMMAND:-ssh -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=2}"
+  echo "Cloning mirror repository..."
+  timeout --signal=TERM --kill-after=10s "${CLONE_TIMEOUT}s" git clone "$KNOWBASE_MIRROR_REPO_URL" "$REPO_DIR"
 fi
 
 # Configure git identity
