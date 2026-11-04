@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.0 (2026-11-04)
+
+- `init` 支持 `--app-id` / `--app-secret`（或 `KNOWBASE_LARK_APP_ID` / `KNOWBASE_LARK_APP_SECRET`）传入飞书应用：凭证写入 lark-cli 专用 profile `knowbase-writer`，agent 提示词引导用应用身份写知识库，供没有个人飞书身份的平台接入；`uninstall` 一并清除凭证。
+
 ## 1.1.1 (2026-10-23)
 
 - 接入 npm 自动发布：推送 `main` 后检查版本，构建、测试和打包检查通过后使用 Trusted Publishing 发布新版本；已发布版本自动跳过。
