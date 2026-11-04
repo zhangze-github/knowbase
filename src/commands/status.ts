@@ -14,6 +14,7 @@ import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js"
 import { getAutostart } from "../platform/index.js";
 import { readKbTree, TREE_MAX_BYTES } from "../agent-config.js";
 import { additionalAgentConfigStatus } from "../agent-integrations.js";
+import { LARK_WRITE_PROFILE } from "../lark-write-app.js";
 import {
   planSkills,
   readExistingTargets,
@@ -51,6 +52,9 @@ export function cmdStatus(): number {
   console.log(`远端仓库：  ${cfg.repoUrl}  (分支 ${cfg.branch})`);
   if (mirrorMode) {
     console.log("模式：      飞书镜像（只读，真相源在飞书知识库）");
+  }
+  if (cfg.larkAppId) {
+    console.log(`写入身份：  飞书应用 ${cfg.larkAppId}（lark-cli profile：${LARK_WRITE_PROFILE}）`);
   }
   console.log(`配置文件：  ${configPath()}`);
   console.log("");

@@ -11,16 +11,19 @@ import { getAutostart } from "../platform/index.js";
 import { uninstallAgentConfig } from "../agent-config.js";
 import { uninstallSkills } from "../skills-sync.js";
 import { isMirrorMode, setMirrorLock } from "../mirror.js";
+import { LARK_WRITE_PROFILE, removeLarkWriteProfile } from "../lark-write-app.js";
 
 /** `knowbase uninstall`：注销自启、停止守护进程、保留本地文件夹。 */
 export function cmdUninstall(): number {
   let dir: string | null = null;
   let hermesHome: string | undefined;
+  let larkAppId: string | undefined;
   if (configExists()) {
     try {
       const cfg = loadConfig();
       dir = cfg.dir;
       hermesHome = cfg.hermesHome;
+      larkAppId = cfg.larkAppId;
     } catch {
       dir = null;
     }
@@ -52,6 +55,15 @@ export function cmdUninstall(): number {
       console.warn(
         `⚠ 解除只读锁时出错：${e instanceof Error ? e.message : String(e)}`
       );
+    }
+  }
+
+  // Secret 是 init 存进 lark-cli 的，卸载时一并清除，不留凭证
+  if (larkAppId) {
+    if (removeLarkWriteProfile()) {
+      console.log(`• 已清除飞书写入应用凭证（lark-cli profile：${LARK_WRITE_PROFILE}）`);
+    } else {
+      console.warn(`⚠ 未能清除飞书写入应用凭证，请手动运行：lark-cli profile remove ${LARK_WRITE_PROFILE}`);
     }
   }
 

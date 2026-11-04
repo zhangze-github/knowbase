@@ -32,6 +32,8 @@ export interface Config {
   skills?: boolean;
   /** init 时选定的 Hermes 实例；守护进程不依赖交互 shell 的 HERMES_HOME。 */
   hermesHome?: string;
+  /** 知识库写入使用的飞书应用 App ID；Secret 不落这里，存在 lark-cli 的加密存储中。 */
+  larkAppId?: string;
 }
 
 /** 配置目录：$XDG_CONFIG_HOME/knowbase 或 ~/.config/knowbase 。 */
@@ -151,6 +153,7 @@ export function loadConfig(): Config {
     agentConfig: parsed.agentConfig !== false,
     skills: parsed.skills !== false,
     hermesHome: typeof parsed.hermesHome === "string" && path.isAbsolute(parsed.hermesHome) ? parsed.hermesHome : undefined,
+    larkAppId: typeof parsed.larkAppId === "string" && parsed.larkAppId !== "" ? parsed.larkAppId : undefined,
   };
 }
 

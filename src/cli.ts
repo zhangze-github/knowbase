@@ -39,6 +39,11 @@ program
   .option("--interval <seconds>", "同步间隔秒数（默认 60）")
   .option("--no-agent-config", "跳过配置 Claude Code / Codex / Cursor / Hermes 知识库上下文")
   .option("--no-skills", "跳过把知识库 skills/ 分发到所有分发目标（Claude Code / Codex / Cursor / Hermes）")
+  .option("--app-id <id>", "知识库写入使用的飞书自建应用 App ID（缺省读环境变量 KNOWBASE_LARK_APP_ID；不传则 agent 用成员个人身份写）")
+  .option(
+    "--app-secret <secret>",
+    "该应用的 App Secret（缺省读环境变量 KNOWBASE_LARK_APP_SECRET；命令行传参会留在 shell history，推荐用环境变量）"
+  )
   .description("一次性接入：环境检查 → clone → 上只读锁 → 注册自启 → 配置 AI agent 全局提示词")
   .action((url: string, opts: InitOptions) => run(() => cmdInit(url, opts)));
 

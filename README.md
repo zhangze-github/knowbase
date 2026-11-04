@@ -153,6 +153,15 @@ skills/deploy/SKILL.md      ──►    ~/.hermes/skills/org-deploy/SKILL.md   
 
 - **agent 被引导成「读本地、写飞书」**：托管在 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` 的区块明确写了——读知识走本地 grep（快、无外网依赖），改知识取文件头的 `feishu_url` 用 `lark-doc` 编辑，且编辑前先读飞书上的最新版（本地镜像可能落后几分钟）。新增文档用 `lark-wiki`，参照目录树自行判断挂在哪个节点下：**agent 的编辑与人类成员完全平权，没有专属 AI 的目录**。
   前置条件：成员机器需已配置 lark 工具链（`lark-doc` / `lark-wiki`）；未配置则 agent 只读，写入需人工在飞书完成。
+- **没有个人飞书身份的环境（平台、服务器）可用飞书应用写入**：`init` 时传入应用凭证，agent 提示词会引导所有写操作走 `lark-cli --profile knowbase-writer --as bot`。
+
+  ```bash
+  export KNOWBASE_LARK_APP_ID=cli_xxx
+  export KNOWBASE_LARK_APP_SECRET=xxx
+  knowbase init <git-url>
+  ```
+
+  也可用 `--app-id` / `--app-secret` 传入，但命令行传参会留在 shell history。前提：本机已装 `lark-cli`；应用已开通文档编辑权限并发布，且已被加为知识库的可编辑成员（否则写入会报无权限）。Secret 由 lark-cli 加密保存，knowbase 配置只记 App ID；凭证错误时 `init` 直接失败。重跑 `init` 不带凭证会沿用已配置的应用，`knowbase uninstall` 会清除凭证。飞书上的改动归属显示为该应用，看不出具体由谁触发。
 
 - **`skills/` 不走飞书**：该目录不受镜像同步影响，通过仓库 PR 维护，照常自动分发到全团队。让可执行流程与知识库内容可以独立演进。
 

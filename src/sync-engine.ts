@@ -190,7 +190,11 @@ export function refreshAgentPrompts(
 ): void {
   if (cfg.agentConfig === false) return;
   try {
-    const changes = syncAgentConfig(cfg.dir, home, { onlyExisting: true, hermesHome: cfg.hermesHome });
+    const changes = syncAgentConfig(cfg.dir, home, {
+      onlyExisting: true,
+      hermesHome: cfg.hermesHome,
+      larkWriteApp: Boolean(cfg.larkAppId),
+    });
     for (const c of changes) {
       if (c.action !== "skipped") continue;
       if (c.reason) {

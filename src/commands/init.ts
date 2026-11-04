@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   Config,
+  configExists,
   DEFAULT_BRANCH,
   DEFAULT_INTERVAL,
   defaultDir,
+  loadConfig,
   saveConfig,
   Logger,
 } from "../config.js";
@@ -14,6 +16,13 @@ import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
 import { hermesHomeDir } from "../agent-installations.js";
 import { syncSkills, summarizeByTool } from "../skills-sync.js";
+import {
+  configureLarkWriteApp,
+  hasLarkCli,
+  isValidAppId,
+  LARK_WRITE_PROFILE,
+  removeLarkWriteProfile,
+} from "../lark-write-app.js";
 
 export interface InitOptions {
   dir?: string;
@@ -23,6 +32,19 @@ export interface InitOptions {
   agentConfig?: boolean;
   /** commander 的 --no-skills 会把该值设为 false（默认 true）。 */
   skills?: boolean;
+  /** 知识库写入使用的飞书应用；缺省读 KNOWBASE_LARK_APP_ID / KNOWBASE_LARK_APP_SECRET。 */
+  appId?: string;
+  appSecret?: string;
+}
+
+/** 上次 init 配置的写入应用。重跑 init 不带凭证时沿用，不能静默退回个人身份。 */
+function previousLarkAppId(): string | undefined {
+  if (!configExists()) return undefined;
+  try {
+    return loadConfig().larkAppId;
+  } catch {
+    return undefined;
+  }
 }
 
 function printSshGuidance(url: string): void {
@@ -56,6 +78,24 @@ function ensureLine(filePath: string, line: string): boolean {
 
 export function cmdInit(url: string, opts: InitOptions): number {
   const logger = new Logger();
+
+  // 写入应用的参数在动任何东西之前校验：用户明确要求应用身份时，
+  // 不能带着缺失的凭证或工具接入完，再让 agent 退回个人身份写知识库。
+  const appId = opts.appId ?? process.env.KNOWBASE_LARK_APP_ID;
+  const appSecret = opts.appSecret ?? process.env.KNOWBASE_LARK_APP_SECRET;
+  if (Boolean(appId) !== Boolean(appSecret)) {
+    console.error("✗ 飞书应用凭证不完整：--app-id 与 --app-secret 必须同时提供。");
+    return 1;
+  }
+  if (appId && !isValidAppId(appId)) {
+    console.error(`✗ --app-id 格式不正确：${appId}`);
+    return 1;
+  }
+  if (appId && !hasLarkCli()) {
+    console.error("✗ 未检测到 lark-cli，无法配置飞书写入应用。请先安装：");
+    console.error("  npx @larksuite/cli@latest install");
+    return 1;
+  }
 
   // 1. 环境检查
   const ver = git.gitVersion();
@@ -130,8 +170,10 @@ export function cmdInit(url: string, opts: InitOptions): number {
   console.log("");
   console.log("• 本目录是飞书知识库的只读镜像（真相源在飞书）：");
   console.log("  修改请走各文件头部 frontmatter 的 feishu_url，用飞书文档工具编辑对应文档。");
-  console.log("  agent 写入依赖本机已配置的 lark 工具链（lark-doc / lark-wiki）；");
-  console.log("  未配置则 agent 只读，写入建议由人工在飞书完成（详见 spec §6）。");
+  if (!appId) {
+    console.log("  agent 写入依赖本机已配置的 lark 工具链（lark-doc / lark-wiki）；");
+    console.log("  未配置则 agent 只读，写入建议由人工在飞书完成（详见 spec §6）。");
+  }
   console.log("");
 
   // 切到目标分支。空仓库（HEAD 未诞生）跳过——首次推送时由 HEAD:<branch> 建立；
@@ -146,6 +188,24 @@ export function cmdInit(url: string, opts: InitOptions): number {
     }
   }
 
+  // 配置写入应用。放在镜像校验之后：被拒绝的仓库不该在本机留下凭证。
+  const prevLarkAppId = previousLarkAppId();
+  if (appId && appSecret) {
+    const r = configureLarkWriteApp(appId, appSecret);
+    if (!r.ok) {
+      // 校验失败时 lark-cli 也已落盘。首次配置就清掉，别留一份无效凭证；
+      // 已接入的机器 config 还指向该 profile，留给用户修正后重跑。
+      if (!prevLarkAppId) removeLarkWriteProfile();
+      console.error("✗ 飞书写入应用配置失败，请检查 App ID / App Secret 及应用是否已发布：");
+      console.error(r.error);
+      logger.log(`init 配置写入应用失败：appId=${appId}`);
+      return 1;
+    }
+    console.log(`• 知识库写入将使用飞书应用 ${appId}（lark-cli profile：${LARK_WRITE_PROFILE}）`);
+    console.log("  请确认该应用已开通文档编辑权限，且已被加为知识库的可编辑成员。");
+  }
+  const larkAppId = appId || prevLarkAppId;
+
   // 4. 保存配置
   const cfg: Config = {
     repoUrl: url,
@@ -155,6 +215,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     agentConfig: opts.agentConfig !== false,
     skills: opts.skills !== false,
     hermesHome: hermesHomeDir(),
+    larkAppId,
   };
   saveConfig(cfg);
   console.log("• 已保存配置");
@@ -176,7 +237,10 @@ export function cmdInit(url: string, opts: InitOptions): number {
     console.log("• 已跳过 AI agent 全局提示词配置（--no-agent-config）");
   } else {
     try {
-      const changes = syncAgentConfig(dir, undefined, { hermesHome: cfg.hermesHome });
+      const changes = syncAgentConfig(dir, undefined, {
+        hermesHome: cfg.hermesHome,
+        larkWriteApp: Boolean(larkAppId),
+      });
       for (const c of changes) {
         if (c.action === "skipped") {
           if (c.reason) {

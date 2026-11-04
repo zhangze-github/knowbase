@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
 import { syncAdditionalAgentConfig, uninstallAdditionalAgentConfig } from "./agent-integrations.js";
+import { LARK_WRITE_PROFILE } from "./lark-write-app.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -181,7 +182,7 @@ export function readKbTree(dir: string): KbTree {
  * 生成托管区块正文（含起止标记），内嵌本机知识库目录与自动生成的目录树。
  * tree 传 null / undefined（或纯空白）时输出回退文案（知识库暂无文件的情况）。
  */
-export function buildBlock(dir: string, tree?: string | null): string {
+export function buildBlock(dir: string, tree?: string | null, larkWriteApp = false): string {
   // 纯空白的树（知识库确实没有文件）也走回退文案：否则会输出一个有标题没正文的
   // 段落，且与 status 「暂无文件」的口径打架。
   const hasTree = tree != null && tree.trim() !== "";
@@ -191,6 +192,11 @@ export function buildBlock(dir: string, tree?: string | null): string {
 ${tree}`
     : `知识库暂无文件，需要时直接 grep 全库。`;
 
+  const writeIdentity = larkWriteApp
+    ? `- **写入身份：本机用飞书应用身份操作知识库**。调用 lark-cli 操作知识库文档时（含读取最新内容）一律带 \`--profile ${LARK_WRITE_PROFILE} --as bot\`；本条优先于 lark-doc / lark-wiki 中「优先用 user 身份」的说明，不要用 \`--as user\`，也不要发起 \`auth login\`。权限不足时如实告知用户（应用须是知识库的可编辑成员），不要换身份重试。应用没有个人文档库，新建文档必须显式指定 \`--parent-node-token\`（可用目标目录文档的 \`feishu_url\` 通过 \`wiki +node-get\` 解析）。
+`
+    : "";
+
   return `${BLOCK_START}
 ## 组织知识库（knowbase · 飞书镜像）
 
@@ -199,7 +205,7 @@ ${tree}`
 **读**：需要业务背景、历史决策、架构约定、环境配置、踩坑记录等组织隐性知识时，先 grep / 读该目录下的 Markdown。
 
 **写（重要，本目录只读，写入走飞书）**：
-- 禁止直接编辑本目录任何文件——文件已设只读，写入会失败；绕过锁写入的内容也会在下个同步周期被自动丢弃。
+${writeIdentity}- 禁止直接编辑本目录任何文件——文件已设只读，写入会失败；绕过锁写入的内容也会在下个同步周期被自动丢弃。
 - 要修改某篇知识：取该文件头部 frontmatter 的 \`feishu_url\`，用飞书文档工具（lark-doc）编辑对应飞书文档。
 - 编辑前先用 lark-doc 读取该文档的最新内容——本地镜像可能落后几分钟，不要基于旧版整篇覆盖。
 - 要新增知识：优先补充进已有的相关文档；确需新文档时，用 lark-wiki 创建，并参照下方目录树自行判断挂到哪个节点下最合适。你的编辑与人类成员完全平权，没有专属 AI 的目录。
@@ -268,6 +274,8 @@ export interface AgentConfigChange {
 /** syncAgentConfig 的可选行为。 */
 export interface SyncAgentConfigOptions {
   hermesHome?: string;
+  /** 本机配置了飞书写入应用：提示词引导 agent 用应用身份写知识库。 */
+  larkWriteApp?: boolean;
   /**
    * 只刷新已存在的区块，绝不创建。守护进程用；init 不用。
    * 用户手动删掉区块、或当年用 --no-agent-config 接入（配置里没有该键、被
@@ -340,7 +348,7 @@ export function syncAgentConfig(
   home: string = os.homedir(),
   opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
-  const block = buildBlock(dir, readKbTree(dir).text);
+  const block = buildBlock(dir, readKbTree(dir).text, opts.larkWriteApp);
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);
