@@ -3,7 +3,6 @@ import os from "node:os";
 import path from "node:path";
 import { ORG_PREFIX, SKILLS_SUBDIR } from "./skills-sync.js";
 import { syncAdditionalAgentConfig, uninstallAdditionalAgentConfig } from "./agent-integrations.js";
-import { LARK_WRITE_PROFILE } from "./lark-write-app.js";
 
 /**
  * 把知识库集成片段写入各 AI agent 的全局提示词文件，使 agent 天然知道
@@ -29,14 +28,27 @@ export function agentTargets(home: string = os.homedir()): AgentTarget[] {
   ];
 }
 
-/** 注入目录树的字节上限（约 2k token）。树长起来会静默吃掉每次会话的上下文预算。 */
-export const TREE_MAX_BYTES = 8192;
+/** 内置 skill 的目录名与 name：完整目录、检索方法与写入流程都在这里，按需加载。 */
+export const KB_SKILL_NAME = "knowbase";
 
 /**
- * 中和索引正文中的区块标记字样。
+ * 常驻目录地图的字节上限。
  *
- * 索引由外部 agent 生成，正文里完全可能出现 KNOWBASE:END（例如索引记录了
- * knowbase 自身的文档）。若原样内嵌，upsertBlock / stripBlock 会匹配到提前
+ * 常驻区块每次会话都进上下文，且在 Codex 里与全局、各项目 AGENTS.md 共用
+ * 32 KiB 预算、在 Hermes 里受 4,000 字符上限约束，所以它的大小必须与知识库
+ * 规模脱钩。地图只列目录与篇数、不列文件；完整文件清单放进内置 skill 的
+ * references/catalog.md，按需读取。
+ */
+export const MAP_MAX_BYTES = 1536;
+
+/** 地图最多展开的目录层数；在预算内自动取能放下的最深层数。 */
+export const MAP_MAX_DEPTH = 4;
+
+/**
+ * 中和正文中的区块标记字样。
+ *
+ * 文件名、目录名来自飞书文档标题，完全可能出现 KNOWBASE:END（例如某篇文档
+ * 记录 knowbase 自身）。若原样内嵌，upsertBlock / stripBlock 会匹配到提前
  * 出现的结束标记、切错位置，吞掉用户 CLAUDE.md 中区块之后的内容。
  */
 export function neutralizeMarkers(text: string): string {
@@ -44,7 +56,7 @@ export function neutralizeMarkers(text: string): string {
 }
 
 /** 按字节上限截断，切点落在不超限的最后一个换行处。 */
-function truncateAtLine(text: string, max: number): { text: string; truncated: boolean } {
+export function truncateAtLine(text: string, max: number): { text: string; truncated: boolean } {
   const buf = Buffer.from(text, "utf8");
   if (buf.length <= max) return { text, truncated: false };
   const head = buf.subarray(0, max).toString("utf8");
@@ -55,168 +67,138 @@ function truncateAtLine(text: string, max: number): { text: string; truncated: b
   return { text: kept, truncated: true };
 }
 
-export interface KbTree {
-  /** 可直接内嵌的树文本；知识库无文件时为 null。 */
-  text: string | null;
-  /**
-   * 文件总数（不含被跳过的条目），**含**因目录过宽被折叠隐藏的那些。
-   * 折叠是展示策略，不改变知识库的真实规模——status 报的必须是真实规模。
-   */
-  files: number;
-  /** 因目录过宽被折叠隐藏、未出现在树文本里的文件数。 */
-  hidden: number;
-  /** 树文本的字节数（折叠后、字节截断前，供 status 展示）。 */
-  bytes: number;
-  truncated: boolean;
+/** 知识库里的一个目录节点（递归统计）。 */
+export interface KbDirNode {
+  name: string;
+  /** 本目录直属文件名，已排序。 */
+  files: string[];
+  /** 子目录，已排序。 */
+  dirs: KbDirNode[];
+  /** 本目录及所有子目录的文件总数。 */
+  total: number;
 }
 
 /**
- * 单个目录内列出的文件数上限：超过 DIR_HEAD + DIR_TAIL 时只保留头尾两段，
- * 中间折叠成一行提示。**只限宽度，不限深度**。
- *
- * 为什么限宽而不限深：知识库的增长发生在目录宽度上（同一主题下持续追加文档），
- * 深度由人在飞书里的节点层级决定，本身是收敛的。只限深度对平铺型知识库完全
- * 无效——实测样本 12 篇里有 9 篇平铺在同一目录下，限深 3 层省 0 字节。
- * 限宽之后注入行数的上界是「目录数 × (DIR_HEAD + 1 + DIR_TAIL)」，与文件总数
- * 无关，知识库再怎么涨都不会撑爆提示词预算。
- *
- * 为什么留头也留尾、而不是只留前 10：文件按名字排序，头尾两段合起来能露出这个
- * 目录的命名风格与取值范围（最早/最晚、A 段/Z 段），比同样字数的单侧前缀更能
- * 让 agent 判断「我要找的东西是否可能在这个目录里」。
+ * 递归扫描知识库：目录与文件各自按默认字符串排序，保证跨平台（不同文件系统的
+ * readdir 顺序不保证一致）确定性输出。
+ * 跳过点开头的条目（.git、.knowbase-mirror.json 等管理文件）、node_modules 与
+ * 仓库根 skills/——团队 skills 由客户端按需发现，不是知识文档。
+ * 任意一层 readdir 失败（目录不存在、权限问题等）当作空，不向上抛：daemon 路径
+ * 不能因为知识库目录一时不可读就崩掉。
  */
-export const DIR_HEAD = 5;
-export const DIR_TAIL = 5;
-
-/**
- * 折叠的最小收益门槛：隐藏数不到这个值就全列，不折叠。
- *
- * 折叠行本身要占约 50 字节，而一个中文文件名行约 45 字节——藏 1 篇是净亏，
- * 藏 2 篇只省 40 字节。收益微薄时折叠还有额外代价：平白告诉 agent「这份清单
- * 不完整」，诱导它多跑一次无谓的 grep。从 3 篇起收益才明显盖过这两项成本。
- */
-export const MIN_HIDDEN = 3;
-
-/**
- * 递归列出一层目录下的行：目录先于文件、各自按默认字符串排序，保证
- * 跨平台（不同文件系统的 readdir 顺序不保证一致）确定性输出。
- * 跳过点开头的条目（.git、.knowbase-mirror.json、.gitignore、
- * .knowbase-pause 等 knowbase/git 自身的管理文件）、node_modules 与仓库根 skills/——
- * 团队 skills 由客户端按需发现，不能把其目录和配套文件当作知识目录注入。
- * 这些对 agent 定位知识没有意义，混进树里只会稀释信噪比。
- * 任意一层 readdir 失败（目录不存在、权限问题等）当作空，不向上抛。
- */
-function listTree(
-  dir: string,
-  indent: string,
-  acc: string[],
-  counter: { files: number; hidden: number }
-): void {
+export function scanKb(dir: string, name = "", root = true): KbDirNode {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return;
+    return { name, files: [], dirs: [], total: 0 };
   }
   const visible = entries.filter((e) =>
     !e.name.startsWith(".") && e.name !== "node_modules" &&
-    !(indent === "" && e.name === SKILLS_SUBDIR)
+    !(root && e.name === SKILLS_SUBDIR)
   );
-  const dirs = visible.filter((e) => e.isDirectory()).map((e) => e.name).sort();
+  const dirs = visible
+    .filter((e) => e.isDirectory())
+    .map((e) => e.name)
+    .sort()
+    .map((n) => scanKb(path.join(dir, n), n, false));
   const files = visible.filter((e) => !e.isDirectory()).map((e) => e.name).sort();
-  for (const name of dirs) {
-    acc.push(`${indent}${name}/`);
-    listTree(path.join(dir, name), indent + "  ", acc, counter);
+  const total = files.length + dirs.reduce((s, d) => s + d.total, 0);
+  return { name, files, dirs, total };
+}
+
+function countDirs(node: KbDirNode): number {
+  return node.dirs.reduce((s, d) => s + 1 + countDirs(d), 0);
+}
+
+function dirDepth(node: KbDirNode): number {
+  return node.dirs.reduce((m, d) => Math.max(m, 1 + dirDepth(d)), 0);
+}
+
+function mapLines(node: KbDirNode, depth: number, indent: string, acc: string[]): void {
+  for (const d of node.dirs) {
+    acc.push(`${indent}${d.name}/（${d.total}）`);
+    if (depth > 1) mapLines(d, depth - 1, indent + "  ", acc);
   }
-  counter.files += files.length;
-  const hidden = files.length - DIR_HEAD - DIR_TAIL;
-  if (hidden < MIN_HIDDEN) {
-    for (const name of files) acc.push(`${indent}${name}`);
-    return;
-  }
-  counter.hidden += hidden;
-  for (const name of files.slice(0, DIR_HEAD)) acc.push(`${indent}${name}`);
-  // 折叠行必须同时说清「隐藏了多少」与「怎么看到全部」。只写省略号会让 agent 把
-  // 这份列表当成完整清单，在里面找不到就得出「知识库里没有」的错误负结论——那
-  // 比压根不注入更坏，因为不注入时它至少还会去 grep。
-  acc.push(
-    `${indent}…另有 ${hidden} 篇未列出（本目录共 ${files.length} 篇），grep 本目录定位`
-  );
-  for (const name of files.slice(-DIR_TAIL)) acc.push(`${indent}${name}`);
+}
+
+export interface KbMap {
+  /** 可直接内嵌的地图文本；知识库无文件时为 null。 */
+  text: string | null;
+  /** 知识库文件总数（不含 skills/ 等被跳过的条目）。 */
+  files: number;
+  /** 目录总数。 */
+  dirs: number;
+  /** 地图实际展开到第几层目录；0 表示没有子目录。 */
+  depth: number;
+  /** 根目录直属文件数。 */
+  rootFiles: number;
+  /** 即使只展开一层也超预算、被按行截断。 */
+  truncated: boolean;
 }
 
 /**
- * 生成知识库目录树，替代旧的「根 index.md 快照」注入。
+ * 生成常驻目录地图：只列目录与递归篇数，不列文件。
  *
- * 为什么用自动生成的树取代 index.md：index.md 要人（或专门的索引维护 agent）
- * 持续手改才不过期，团队实践下来经常是「建了一次、之后再没更新过」；目录树
- * 由 knowbase 每个同步周期直接扫描文件系统生成，零维护、永不过期。镜像模式下
- * 文件名本身就是飞书文档标题（见 spec §9），是天然的语义索引，树上一眼就能
- * 看出「哪篇文档在哪」，agent 不需要再多一层人工索引就能按路径定位文件。
- *
- * 目录不存在 / 读取失败一律返回空结果，绝不抛错——daemon 路径不能因为
- * 知识库目录一时不可读就崩掉。
+ * 为什么不再常驻文件清单：清单的大小随文档数线性增长，旧实现靠「每目录只列
+ * 头尾各 5 篇」折叠来限宽，但实测 110 篇时几乎没有目录触发折叠、清单已逼近
+ * 8KB 上限，再涨就会被按行截断。目录地图的大小只随目录数增长，并且在预算内
+ * 自适应地选最深能放下的层数——知识库变大时地图变粗，而不是变长。
  */
-export function readKbTree(dir: string): KbTree {
-  const lines: string[] = [];
-  const counter = { files: 0, hidden: 0 };
-  listTree(dir, "", lines, counter);
+export function readKbMap(dir: string): KbMap {
+  const root = scanKb(dir);
+  const dirs = countDirs(root);
+  if (root.total === 0) {
+    return { text: null, files: 0, dirs, depth: 0, rootFiles: 0, truncated: false };
+  }
+  let depth = 0;
+  let lines: string[] = [];
+  // 从树的真实深度（不超过上限）开始往浅试：只有一层目录时不能报「展开到第 4 层」
+  for (let d = Math.min(MAP_MAX_DEPTH, dirDepth(root)); d >= 1; d--) {
+    const acc: string[] = [];
+    mapLines(root, d, "", acc);
+    lines = acc;
+    depth = d;
+    if (Buffer.byteLength(neutralizeMarkers(acc.join("\n")), "utf8") <= MAP_MAX_BYTES) break;
+  }
   if (lines.length === 0) {
-    return { text: null, files: 0, hidden: 0, bytes: 0, truncated: false };
+    return { text: null, files: root.total, dirs, depth: 0, rootFiles: root.files.length, truncated: false };
   }
-  const raw = lines.join("\n");
-  const bytes = Buffer.byteLength(raw, "utf8");
-  const cut = truncateAtLine(neutralizeMarkers(raw), TREE_MAX_BYTES);
+  const cut = truncateAtLine(neutralizeMarkers(lines.join("\n")), MAP_MAX_BYTES);
   const text = cut.truncated
-    ? `${cut.text}\n\n…（目录树过长已截断，其余文件直接 grep 全库定位）`
+    ? `${cut.text}\n…（目录过多已截断，其余目录见完整目录或 ls 定位）`
     : cut.text;
-  return {
-    text,
-    files: counter.files,
-    hidden: counter.hidden,
-    bytes,
-    truncated: cut.truncated,
-  };
+  return { text, files: root.total, dirs, depth, rootFiles: root.files.length, truncated: cut.truncated };
 }
 
 /**
- * 生成托管区块正文（含起止标记），内嵌本机知识库目录与自动生成的目录树。
- * tree 传 null / undefined（或纯空白）时输出回退文案（知识库暂无文件的情况）。
+ * 生成托管区块正文（含起止标记）：只放每次会话都需要的东西——知识库位置、
+ * 何时查、怎么查、只读约束与目录地图。写入流程、沉淀标准与完整文件清单
+ * 都在内置 skill（KB_SKILL_NAME）里，按需加载。
+ *
+ * map 传 null / undefined（或无文件）时输出回退文案（知识库暂无文件的情况）。
  */
-export function buildBlock(dir: string, tree?: string | null, larkWriteApp = false): string {
-  // 纯空白的树（知识库确实没有文件）也走回退文案：否则会输出一个有标题没正文的
-  // 段落，且与 status 「暂无文件」的口径打架。
-  const hasTree = tree != null && tree.trim() !== "";
-  const treeSection = hasTree
-    ? `### 知识库目录树（由 knowbase 自动生成）
+export function buildBlock(dir: string, map?: KbMap | null): string {
+  const hasMap = map != null && map.files > 0;
+  const mapSection = !hasMap
+    ? `知识库暂无文件，需要时直接 rg 全库。`
+    : map.text
+      ? `### 目录地图（目录/（篇数），展开到第 ${map.depth} 层，共 ${map.files} 篇）
 
-${tree}`
-    : `知识库暂无文件，需要时直接 grep 全库。`;
-
-  const writeIdentity = larkWriteApp
-    ? `- **写入身份：本机用飞书应用身份操作知识库**。调用 lark-cli 操作知识库文档时（含读取最新内容）一律带 \`--profile ${LARK_WRITE_PROFILE} --as bot\`；本条优先于 lark-doc / lark-wiki 中「优先用 user 身份」的说明，不要用 \`--as user\`，也不要发起 \`auth login\`。权限不足时如实告知用户（应用须是知识库的可编辑成员），不要换身份重试。应用没有个人文档库，新建文档必须显式指定 \`--parent-node-token\`（可用目标目录文档的 \`feishu_url\` 通过 \`wiki +node-get\` 解析）。
-`
-    : "";
+${map.text}${map.rootFiles > 0 ? `\n（根目录另有 ${map.rootFiles} 篇）` : ""}`
+      : `共 ${map.files} 篇，均在根目录下。`;
 
   return `${BLOCK_START}
 ## 组织知识库（knowbase · 飞书镜像）
 
-\`${dir}\` —— 飞书知识库的**只读本地镜像**，全组织共享，后台自动从飞书单向同步。
+\`${dir}\` 是飞书知识库的**只读本地镜像**，全组织共享，后台自动单向同步；文件名即飞书文档标题。
 
-**读**：需要业务背景、历史决策、架构约定、环境配置、踩坑记录等组织隐性知识时，先 grep / 读该目录下的 Markdown。
+- **何时查**：涉及业务背景、历史决策、架构约定、环境与服务配置、踩坑记录、跨项目约定等组织知识时，先查知识库再回答或动手。
+- **怎么查**：先按下方地图定位目录，再用 \`rg\` 搜全文和文件名；完整文件清单与检索方法在 skill \`${KB_SKILL_NAME}\`。**说「知识库里没有」之前**，必须用中英文、同义词各搜一轮全文和文件名。
+- **只读**：不要编辑本目录任何文件（已设只读，改动会被下个同步周期丢弃）。要修改或新增知识，先加载 skill \`${KB_SKILL_NAME}\`，按其中的写入流程走飞书。
+- **团队 skill**：本机 \`${ORG_PREFIX}<name>\` 系列 skill 由知识库 \`${SKILLS_SUBDIR}/\` 目录分发。
 
-**写（重要，本目录只读，写入走飞书）**：
-${writeIdentity}- 禁止直接编辑本目录任何文件——文件已设只读，写入会失败；绕过锁写入的内容也会在下个同步周期被自动丢弃。
-- 要修改某篇知识：取该文件头部 frontmatter 的 \`feishu_url\`，用飞书文档工具（lark-doc）编辑对应飞书文档。
-- 编辑前先用 lark-doc 读取该文档的最新内容——本地镜像可能落后几分钟，不要基于旧版整篇覆盖。
-- 要新增知识：优先补充进已有的相关文档；确需新文档时，用 lark-wiki 创建，并参照下方目录树自行判断挂到哪个节点下最合适。你的编辑与人类成员完全平权，没有专属 AI 的目录。
-- 只沉淀对整个组织/团队有复用价值的内容：业务规则与背景、技术决策及其原因、公共环境/服务配置、通用踩坑与解决方案、跨项目约定。个人偏好与习惯、个人待办/日程/草稿、仅与本机或当前个人任务相关的内容、个人隐私信息——一律不进知识库；拿不准先询问用户。
-- 修改会在几分钟内自动回流到本目录；同一会话内如需引用刚写入的内容，以写进飞书的版本为准。
-
-**团队 skill**：\`${SKILLS_SUBDIR}/\` 目录不走飞书，通过知识库 git 仓库提 PR 维护（需含 \`name\` / \`description\` frontmatter），knowbase 自动分发到全团队，本机以 \`${ORG_PREFIX}<name>\` 出现。
-
-**导航**：下方目录树是全库实时地图（每周期自动刷新，文件名即主题），先在树中定位路径再读取。树不是完整清单——文件多的目录只列头尾各 5 篇、中间折叠成「另有 N 篇未列出」；**树里找不到不等于库里没有**，遇到折叠标记或没把握时一律 grep 全库确认。
-
-${treeSection}
+${mapSection}
 ${BLOCK_END}`;
 }
 
@@ -348,7 +330,7 @@ export function syncAgentConfig(
   home: string = os.homedir(),
   opts: SyncAgentConfigOptions = {}
 ): AgentConfigChange[] {
-  const block = buildBlock(dir, readKbTree(dir).text, opts.larkWriteApp);
+  const block = buildBlock(dir, readKbMap(dir));
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);

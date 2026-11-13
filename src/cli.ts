@@ -6,7 +6,7 @@ import { cmdInit, InitOptions } from "./commands/init.js";
 import { cmdStatus } from "./commands/status.js";
 import { cmdSync } from "./commands/sync.js";
 import { cmdUninstall } from "./commands/uninstall.js";
-import { cmdDaemon } from "./commands/daemon.js";
+import { cmdDaemon, cmdDaemonRestart } from "./commands/daemon.js";
 import { cmdExporter } from "./commands/exporter.js";
 
 const require = createRequire(import.meta.url);
@@ -104,9 +104,15 @@ program
     }
   });
 
+// 隐藏命令：npm 全局升级后由 postinstall 调用，重启守护进程加载新版本
+program
+  .command("daemon-restart", { hidden: true })
+  .description("（内部）升级后重启后台守护进程")
+  .action(() => cmdDaemonRestart());
+
 // 升级提示：后台检查、每 24h 至多一次，绝不拖慢命令（product.md §2.2 / §5.3）
 // daemon 自身不做提示。
-if (process.argv[2] !== "daemon") {
+if (process.argv[2] !== "daemon" && process.argv[2] !== "daemon-restart") {
   updateNotifier({ pkg, updateCheckInterval: 1000 * 60 * 60 * 24 }).notify({
     message: `有新版本 knowbase：{currentVersion} → {latestVersion}\n运行 npm i -g ${pkg.name} 升级`,
   });

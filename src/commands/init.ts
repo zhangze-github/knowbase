@@ -14,6 +14,7 @@ import * as git from "../git.js";
 import { isMirrorMode, setMirrorLock } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
 import { syncAgentConfig } from "../agent-config.js";
+import { syncKbSkill } from "../kb-skill.js";
 import { hermesHomeDir } from "../agent-installations.js";
 import { syncSkills, summarizeByTool } from "../skills-sync.js";
 import {
@@ -267,6 +268,23 @@ export function cmdInit(url: string, opts: InitOptions): number {
     } catch (e) {
       console.warn(
         `⚠ 配置 AI agent 全局提示词时出错：${e instanceof Error ? e.message : String(e)}`
+      );
+    }
+    try {
+      for (const c of syncKbSkill(dir, undefined, {
+        hermesHome: cfg.hermesHome,
+        larkWriteApp: Boolean(larkAppId),
+      })) {
+        if (c.action === "foreign" || c.action === "failed") {
+          console.warn(`⚠ ${c.tool} 知识库 skill 未写入：${c.dir}：${c.reason}`);
+          continue;
+        }
+        const verb = c.action === "created" ? "已创建" : c.action === "updated" ? "已更新" : "已是最新";
+        console.log(`• ${c.tool} 知识库 skill（完整目录与写入流程）${verb}：${c.dir}`);
+      }
+    } catch (e) {
+      console.warn(
+        `⚠ 写入知识库 skill 时出错：${e instanceof Error ? e.message : String(e)}`
       );
     }
   }

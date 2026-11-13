@@ -14,6 +14,11 @@ export interface Autostart {
   uninstall(): void;
   /** 服务管理器视角下是否已注册。 */
   isInstalled(): boolean;
+  /**
+   * 重启已注册的守护进程，让它加载磁盘上的新版本（npm 升级后调用）。
+   * 未注册时调用方不应调用；失败抛错。
+   */
+  restart(): void;
   /** 面向用户的服务定义文件路径（用于 status/排查）。 */
   definitionPath(): string;
 }

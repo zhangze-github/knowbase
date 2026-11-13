@@ -64,11 +64,13 @@ describe("守护进程：周期末刷新提示词与分发 skills", () => {
     );
     expect(init.status).toBe(0);
 
-    // init clone 下来的镜像已带 docs/guide.md（种子）→ 区块应已含目录树
+    // init clone 下来的镜像已带 docs/guide.md（种子）→ 区块含目录地图，完整目录在 skill 里
     const claude = path.join(home, ".claude", "CLAUDE.md");
+    const catalog = path.join(home, ".claude", "skills", "knowbase", "references", "catalog.md");
     const initial = fs.readFileSync(claude, "utf8");
-    expect(initial).toContain("### 知识库目录树");
-    expect(initial).toContain("guide.md");
+    expect(initial).toContain("### 目录地图");
+    expect(initial).toContain("docs/（1）");
+    expect(fs.readFileSync(catalog, "utf8")).toContain("guide.md");
 
     daemon = spawn("node", [CLI, "daemon"], { env: envFor(), stdio: "ignore" });
 
@@ -82,15 +84,15 @@ describe("守护进程：周期末刷新提示词与分发 skills", () => {
     }, 10000);
     expect(started).toBe(true);
 
-    // exporter 侧新增文档 → 轮询拉下来 → 周期末刷新区块，目录树随之更新
+    // exporter 侧新增文档 → 轮询拉下来 → 周期末刷新区块与知识库 skill
     pushMirrorUpdate(root, "角色定义.md", "---\nfeishu_url: https://x.feishu.cn/wiki/D2\n---\n\n# 角色定义\n");
 
     const refreshed = await waitFor(
-      () => fs.readFileSync(claude, "utf8").includes("角色定义.md"),
+      () => fs.readFileSync(catalog, "utf8").includes("角色定义.md"),
       15000
     );
     expect(refreshed).toBe(true);
-    expect(fs.readFileSync(claude, "utf8")).toContain("### 知识库目录树");
+    expect(fs.readFileSync(claude, "utf8")).toContain("根目录另有 1 篇");
   }, 40000);
 
   it("新增团队 skill 后守护进程自动分发到 ~/.claude/skills", async () => {

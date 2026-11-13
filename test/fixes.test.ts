@@ -6,6 +6,7 @@ import { Logger, writeDaemonState, daemonStatePath } from "../src/config.js";
 import { syncOnce, anotherDaemonRunning } from "../src/sync-engine.js";
 import { stableNodePath } from "../src/platform/index.js";
 import { buildBlock } from "../src/agent-config.js";
+import { buildSkillMd } from "../src/kb-skill.js";
 import {
   tmpDir,
   makeOrigin,
@@ -100,11 +101,11 @@ describe("P1: 稳定 node 路径", () => {
 });
 
 describe("提示词：组织/个人边界", () => {
-  it("托管区块明确禁止个人内容进入知识库", () => {
-    const block = buildBlock("/kb");
-    expect(block).toContain("不进知识库");
-    expect(block).toContain("个人偏好");
-    expect(block).toContain("全组织共享");
-    expect(block).toContain("先询问用户");
+  it("托管区块声明全组织共享，沉淀标准在知识库 skill 里禁止个人内容入库", () => {
+    expect(buildBlock("/kb")).toContain("全组织共享");
+    const skill = buildSkillMd("/kb", 1);
+    expect(skill).toContain("不进知识库");
+    expect(skill).toContain("个人偏好");
+    expect(skill).toContain("先询问用户");
   });
 });

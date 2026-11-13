@@ -80,6 +80,11 @@ WantedBy=default.target
     systemctl("daemon-reload");
   }
 
+  restart(): void {
+    const r = systemctl("restart", UNIT);
+    if (r.code !== 0) throw new Error(`systemctl --user restart 失败：${r.out.trim()}`);
+  }
+
   isInstalled(): boolean {
     if (!fs.existsSync(unitPath())) return false;
     const r = systemctl("is-enabled", UNIT);

@@ -1,6 +1,6 @@
 {
   "name": "knowbase",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "以飞书知识库为唯一真相源的团队知识镜像：exporter 把飞书导出为 Git 仓库，成员本机维护一份只读 Markdown 镜像，agent 读走本地 grep、写走飞书。安装即忘，后台自动同步。",
   "keywords": [
     "knowledge-base",
@@ -26,6 +26,7 @@
   },
   "files": [
     "dist",
+    "scripts/postinstall.cjs",
     "README.md"
   ],
   "engines": {
@@ -34,6 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/postinstall.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "dev": "tsc -w -p tsconfig.json",

@@ -10,11 +10,10 @@ import {
   syncAgentConfig,
   uninstallAgentConfig,
   agentTargets,
-  readKbTree,
-  TREE_MAX_BYTES,
-  DIR_HEAD,
-  DIR_TAIL,
-  MIN_HIDDEN,
+  readKbMap,
+  MAP_MAX_BYTES,
+  MAP_MAX_DEPTH,
+  KB_SKILL_NAME,
   MirrorBlockInfo,
 } from "../src/agent-config.js";
 import { tmpDir } from "./helpers.js";
@@ -112,7 +111,7 @@ describe("syncAgentConfig / uninstallAgentConfig", () => {
   });
 });
 
-describe("目录树读取", () => {
+describe("目录地图读取", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
@@ -121,206 +120,106 @@ describe("目录树读取", () => {
     fs.rmSync(kb, { recursive: true, force: true });
   });
 
-  it("嵌套结构：目录先于文件、各自排序、目录带 / 后缀、缩进两格", () => {
+  it("只列目录与递归篇数，不列文件；目录排序、缩进两格", () => {
     fs.mkdirSync(path.join(kb, "b-dir", "sub"), { recursive: true });
+    fs.mkdirSync(path.join(kb, "a-dir"));
     fs.writeFileSync(path.join(kb, "a.md"), "a");
-    fs.writeFileSync(path.join(kb, "z.txt"), "z");
+    fs.writeFileSync(path.join(kb, "a-dir", "q.md"), "q");
     fs.writeFileSync(path.join(kb, "b-dir", "x.md"), "x");
     fs.writeFileSync(path.join(kb, "b-dir", "sub", "y.md"), "y");
 
-    const r = readKbTree(kb);
-    expect(r.text).toBe(
-      ["b-dir/", "  sub/", "    y.md", "  x.md", "a.md", "z.txt"].join("\n")
-    );
+    const r = readKbMap(kb);
+    expect(r.text).toBe(["a-dir/（1）", "b-dir/（2）", "  sub/（1）"].join("\n"));
     expect(r.files).toBe(4);
+    expect(r.dirs).toBe(3);
+    expect(r.rootFiles).toBe(1);
+    expect(r.text).not.toContain(".md");
     expect(r.truncated).toBe(false);
   });
 
-  it("跳过点开头的条目与 node_modules", () => {
-    fs.writeFileSync(path.join(kb, ".gitignore"), "x");
+  it("跳过点开头的条目、node_modules 与仓库根 skills，保留业务文档中同名目录", () => {
     fs.writeFileSync(path.join(kb, ".knowbase-mirror.json"), "{}");
     fs.mkdirSync(path.join(kb, "node_modules", "pkg"), { recursive: true });
     fs.writeFileSync(path.join(kb, "node_modules", "pkg", "a.js"), "x");
-    fs.writeFileSync(path.join(kb, "README.md"), "x");
+    fs.mkdirSync(path.join(kb, "skills/deploy"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "skills/deploy/SKILL.md"), "team skill");
+    fs.mkdirSync(path.join(kb, "项目/skills"), { recursive: true });
+    fs.writeFileSync(path.join(kb, "项目/skills/培训.md"), "business knowledge");
 
-    const r = readKbTree(kb);
-    expect(r.text).toBe("README.md");
+    const r = readKbMap(kb);
+    expect(r.text).toBe("项目/（1）\n  skills/（1）");
     expect(r.files).toBe(1);
   });
 
-  it("排除仓库根 skills 整棵子树及统计，保留业务文档中同名目录", () => {
-    fs.mkdirSync(path.join(kb, "skills/deploy/references"), { recursive: true });
-    fs.writeFileSync(path.join(kb, "skills/deploy/SKILL.md"), "team skill");
-    fs.writeFileSync(path.join(kb, "skills/deploy/references/guide.md"), "reference");
-    fs.mkdirSync(path.join(kb, "项目/skills"), { recursive: true });
-    fs.writeFileSync(path.join(kb, "项目/skills/培训.md"), "business knowledge");
-    fs.writeFileSync(path.join(kb, "项目/说明.md"), "knowledge");
-
-    const r = readKbTree(kb);
-    expect(r.text).toBe("项目/\n  skills/\n    培训.md\n  说明.md");
-    expect(r.files).toBe(2);
-    expect(r.hidden).toBe(0);
-    expect(r.bytes).toBe(Buffer.byteLength("项目/\n  skills/\n    培训.md\n  说明.md", "utf8"));
-    expect(r.truncated).toBe(false);
-  });
-
-  it("仅有团队 skills 的仓库按空知识库处理，不占用目录树预算", () => {
+  it("空库 / 只有团队 skills / 目录不存在 → text 为 null，不抛错", () => {
+    expect(readKbMap(kb).text).toBe(null);
+    expect(readKbMap(path.join(kb, "nope")).files).toBe(0);
     fs.mkdirSync(path.join(kb, "skills/deploy"), { recursive: true });
     fs.writeFileSync(path.join(kb, "skills/deploy/SKILL.md"), "team skill");
-    expect(readKbTree(kb)).toEqual({ text: null, files: 0, hidden: 0, bytes: 0, truncated: false });
+    expect(readKbMap(kb).files).toBe(0);
   });
 
-  it("空目录 → text 为 null", () => {
-    const r = readKbTree(kb);
-    expect(r.text).toBe(null);
-    expect(r.files).toBe(0);
-    expect(r.bytes).toBe(0);
-    expect(r.truncated).toBe(false);
+  it("只有根目录文件 → 有文件但无地图文本", () => {
+    fs.writeFileSync(path.join(kb, "a.md"), "a");
+    const r = readKbMap(kb);
+    expect(r).toMatchObject({ text: null, files: 1, depth: 0, rootFiles: 1 });
+    expect(buildBlock("/kb", r)).toContain("共 1 篇，均在根目录下");
   });
 
-  it("目录不存在 → 不抛错，text 为 null", () => {
-    const r = readKbTree(path.join(kb, "nope"));
-    expect(r.text).toBe(null);
-    expect(r.files).toBe(0);
+  it.skipIf(process.platform === "win32")("目录名含 KNOWBASE:END 字样被中和", () => {
+    fs.mkdirSync(path.join(kb, "KNOWBASE:END"));
+    fs.writeFileSync(path.join(kb, "KNOWBASE:END", "a.md"), "x");
+    const r = readKbMap(kb);
+    expect(r.text).not.toContain("KNOWBASE:END");
+    expect(r.text).toContain("KNOWBASE_END/");
   });
 
-  it.skipIf(process.platform === "win32")(
-    "文件名含 KNOWBASE:END 字样被中和",
-    () => {
-      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "x");
-      const r = readKbTree(kb);
-      expect(r.text).not.toContain("KNOWBASE:END");
-      expect(r.text).toContain("KNOWBASE_END.md");
+  it("超预算时自动减少展开层数，而不是截断", () => {
+    // 40 个顶层目录，各带 2 层长名子目录：全展开超预算，只展开 1 层放得下
+    for (let i = 0; i < 40; i++) {
+      const d = path.join(kb, `topic-${String(i).padStart(2, "0")}`, "second-level-directory-name", "third-level-directory-name");
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, "a.md"), "x");
     }
-  );
+    const r = readKbMap(kb);
+    expect(r.truncated).toBe(false);
+    expect(r.depth).toBe(1);
+    expect(r.depth).toBeLessThan(MAP_MAX_DEPTH);
+    expect(r.text).toContain("topic-39/（1）");
+    expect(r.text).not.toContain("second-level");
+    expect(Buffer.byteLength(r.text!, "utf8")).toBeLessThanOrEqual(MAP_MAX_BYTES);
+  });
 
-  it("目录数过多仍可能超 8KB → truncated，含截断提示，正文行完整", () => {
-    // 宽度折叠只约束单目录内的文件数，目录本身不折叠：造大量目录仍能撑爆字节上限，
-    // 验证 TREE_MAX_BYTES 这层兜底在折叠之后依然有效。
-    for (let i = 0; i < 2000; i++) {
+  it("顶层目录本身就超预算 → 按行截断并提示，正文行完整", () => {
+    for (let i = 0; i < 500; i++) {
       const d = `dir-${String(i).padStart(5, "0")}`;
       fs.mkdirSync(path.join(kb, d));
       fs.writeFileSync(path.join(kb, d, "a.md"), "x");
     }
-    const r = readKbTree(kb);
+    const r = readKbMap(kb);
     expect(r.truncated).toBe(true);
-    expect(r.text!).toContain("已截断");
-    const body = r.text!.split("\n\n…")[0];
-    // 正文每一行都应完整（没有被从中间切断）
-    expect(body.split("\n").every((l) => /^(dir-\d{5}\/|  a\.md)$/.test(l))).toBe(true);
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(TREE_MAX_BYTES);
-    expect(r.bytes).toBeGreaterThan(TREE_MAX_BYTES);
-  });
-
-  it("目录内文件数不超上限 → 全部列出，无折叠行", () => {
-    const n = DIR_HEAD + DIR_TAIL;
-    for (let i = 0; i < n; i++) {
-      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
-    }
-    const r = readKbTree(kb);
-    expect(r.text!.split("\n")).toHaveLength(n);
-    expect(r.text).not.toContain("未列出");
-    expect(r.hidden).toBe(0);
-    expect(r.files).toBe(n);
-  });
-
-  it("超出上限但隐藏数不足 MIN_HIDDEN → 不折叠，全部列出", () => {
-    // 折叠行本身要占约 50 字节，而一个文件名行约 45 字节：只藏一两篇是净亏，
-    // 还白白让 agent 以为清单不完整。
-    const n = DIR_HEAD + DIR_TAIL + MIN_HIDDEN - 1;
-    for (let i = 0; i < n; i++) {
-      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
-    }
-    const r = readKbTree(kb);
-    expect(r.text!.split("\n")).toHaveLength(n);
-    expect(r.text).not.toContain("未列出");
-    expect(r.hidden).toBe(0);
-    expect(r.files).toBe(n);
-  });
-
-  it("隐藏数刚好达到 MIN_HIDDEN → 开始折叠", () => {
-    const n = DIR_HEAD + DIR_TAIL + MIN_HIDDEN;
-    for (let i = 0; i < n; i++) {
-      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
-    }
-    const r = readKbTree(kb);
-    expect(r.text!.split("\n")).toHaveLength(DIR_HEAD + 1 + DIR_TAIL);
-    expect(r.text).toContain(`另有 ${MIN_HIDDEN} 篇未列出`);
-    expect(r.hidden).toBe(MIN_HIDDEN);
-  });
-
-  it("超出上限 → 保留前 5 与后 5，中间折叠成一行提示", () => {
-    for (let i = 0; i < 25; i++) {
-      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
-    }
-    const r = readKbTree(kb);
+    expect(r.depth).toBe(1);
     const lines = r.text!.split("\n");
-    expect(lines).toHaveLength(DIR_HEAD + 1 + DIR_TAIL);
-    expect(lines.slice(0, DIR_HEAD)).toEqual([
-      "f-00.md",
-      "f-01.md",
-      "f-02.md",
-      "f-03.md",
-      "f-04.md",
-    ]);
-    expect(lines.slice(DIR_HEAD + 1)).toEqual([
-      "f-20.md",
-      "f-21.md",
-      "f-22.md",
-      "f-23.md",
-      "f-24.md",
-    ]);
-    // 折叠行必须同时说清「隐藏了多少」与「怎么看到全部」
-    expect(lines[DIR_HEAD]).toContain("另有 15 篇未列出");
-    expect(lines[DIR_HEAD]).toContain("共 25 篇");
-    expect(lines[DIR_HEAD]).toContain("grep");
-    expect(r.hidden).toBe(15);
-    // 计数含被折叠隐藏的文件：status 要报知识库的真实规模
-    expect(r.files).toBe(25);
+    expect(lines.at(-1)).toContain("已截断");
+    expect(lines.slice(0, -1).every((l) => /^dir-\d{5}\/（1）$/.test(l))).toBe(true);
   });
 
-  it("折叠按目录独立生效，父目录折叠不影响子目录；折叠行缩进与同级文件一致", () => {
-    fs.mkdirSync(path.join(kb, "sub"));
-    for (let i = 0; i < 30; i++) {
-      fs.writeFileSync(path.join(kb, `f-${String(i).padStart(2, "0")}.md`), "x");
-    }
-    for (let i = 0; i < 3; i++) {
-      fs.writeFileSync(path.join(kb, "sub", `s-${i}.md`), "x");
-    }
-    const r = readKbTree(kb);
-    const lines = r.text!.split("\n");
-    // 子目录只有 3 篇，全列
-    expect(lines).toContain("  s-0.md");
-    expect(lines).toContain("  s-2.md");
-    // 根目录折叠，且折叠行不带缩进（与根下文件同级）
-    const fold = lines.find((l) => l.includes("未列出"))!;
-    expect(fold.startsWith(" ")).toBe(false);
-    expect(r.hidden).toBe(20);
-    expect(r.files).toBe(33);
-  });
-
-  it("深度不受限制：深层目录照常递归到底", () => {
-    fs.mkdirSync(path.join(kb, "a", "b", "c", "d"), { recursive: true });
-    fs.writeFileSync(path.join(kb, "a", "b", "c", "d", "deep.md"), "x");
-    const r = readKbTree(kb);
-    expect(r.text).toContain("        deep.md");
-    expect(r.files).toBe(1);
-  });
-
-  it("有界性：单目录文件数从 100 涨到 5000，注入行数不变", () => {
-    const linesFor = (n: number): number => {
+  it("有界性：文档数从 100 涨到 3000，地图与常驻区块大小不变", () => {
+    const sizeFor = (n: number): number => {
       fs.rmSync(kb, { recursive: true, force: true });
-      fs.mkdirSync(kb, { recursive: true });
       for (let i = 0; i < n; i++) {
-        fs.writeFileSync(path.join(kb, `f-${String(i).padStart(5, "0")}.md`), "x");
+        const d = path.join(kb, `领域-${i % 8}`, `主题-${i % 5}`);
+        fs.mkdirSync(d, { recursive: true });
+        fs.writeFileSync(path.join(d, `doc-${String(i).padStart(5, "0")}.md`), "x");
       }
-      return readKbTree(kb).text!.split("\n").length;
+      // 篇数会变，比较时把数字抹掉
+      return buildBlock("/kb", readKbMap(kb)).replace(/\d+/g, "N").length;
     };
-    expect(linesFor(5000)).toBe(linesFor(100));
+    expect(sizeFor(3000)).toBe(sizeFor(100));
   });
 });
 
-describe("区块内嵌目录树", () => {
+describe("常驻区块", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
@@ -331,37 +230,57 @@ describe("区块内嵌目录树", () => {
 
   const claudeFile = () => path.join(home, ".claude", "CLAUDE.md");
 
-  it("有树 → 含目录树标题、文件名与导航段", () => {
-    const b = buildBlock("/kb", "角色/\n  角色定义与职责.md");
-    expect(b).toContain("### 知识库目录树");
-    expect(b).toContain("角色定义与职责.md");
-    expect(b).toContain("**导航**");
+  it("有地图 → 含地图标题、目录、篇数与查找规则", () => {
+    fs.mkdirSync(path.join(kb, "角色"));
+    fs.writeFileSync(path.join(kb, "角色", "角色定义与职责.md"), "x");
+    const b = buildBlock("/kb", readKbMap(kb));
+    expect(b).toContain("### 目录地图");
+    expect(b).toContain("角色/（1）");
+    expect(b).not.toContain("角色定义与职责.md");
+    expect(b).toContain("知识库里没有");
+    expect(b).toContain(`skill \`${KB_SKILL_NAME}\``);
   });
 
-  it("空库→回退（暂无）：无树标题、仍有导航段", () => {
+  it("空库→回退（暂无）：无地图标题、仍有查找规则", () => {
+    for (const b of [buildBlock("/kb", null), buildBlock("/kb"), buildBlock("/kb", readKbMap(kb))]) {
+      expect(b).not.toContain("### 目录地图");
+      expect(b).toContain("暂无");
+      expect(b).toContain("**怎么查**");
+    }
+  });
+
+  it("只放常驻必需内容：写入流程与沉淀标准在 skill 里，不在区块里", () => {
     const b = buildBlock("/kb", null);
-    expect(b).not.toContain("### 知识库目录树");
-    expect(b).toContain("暂无");
-    expect(b).toContain("**导航**");
-  });
-
-  it("区块说明团队 skill 走 git 仓库维护、本机以 org- 前缀出现", () => {
-    // skills/ 不走飞书，这条边界不写清楚 agent 会试图用 lark-wiki 建 skill
-    const b = buildBlock("/kb");
+    expect(b).toContain("只读本地镜像");
+    expect(b).not.toContain("lark-doc");
+    expect(b).not.toContain("--as bot");
+    expect(b).not.toContain("保存即同步");
+    // 团队 skill 边界仍要写明：skills/ 不走飞书
     expect(b).toContain("skills/");
     expect(b).toContain("org-");
   });
 
+  it("预算：常驻区块不超过 3.5KB、Hermes 的 3,700 字符截断线之下", () => {
+    for (let i = 0; i < 200; i++) {
+      const d = path.join(kb, `一级目录-${i % 12}`, `二级目录名字比较长的主题-${i % 7}`, `三级-${i % 3}`);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, `文档-${i}.md`), "x");
+    }
+    const b = buildBlock(kb, readKbMap(kb));
+    expect(Buffer.byteLength(b, "utf8")).toBeLessThanOrEqual(3584);
+    expect(b.length).toBeLessThan(3700);
+  });
+
   it.skipIf(process.platform === "win32")(
-    "文件名含标记字样时 sync→strip 往返不吞用户内容",
+    "目录名含标记字样时 sync→strip 往返不吞用户内容",
     () => {
-      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "x");
+      fs.mkdirSync(path.join(kb, "KNOWBASE:END"));
+      fs.writeFileSync(path.join(kb, "KNOWBASE:END", "a.md"), "x");
       fs.mkdirSync(path.dirname(claudeFile()), { recursive: true });
       fs.writeFileSync(claudeFile(), "# 偏好\n用中文回答\n");
 
       syncAgentConfig(kb, home);
       const written = fs.readFileSync(claudeFile(), "utf8");
-      // 真正的区块结束标记只应出现一次：文件名里的标记字样已被中和
       expect(written.split("KNOWBASE:END").length - 1).toBe(1);
 
       const { content, removed } = stripBlock(written);
@@ -382,18 +301,32 @@ describe("区块内嵌目录树", () => {
     expect(fs.statSync(claudeFile()).mtimeMs).toBe(before);
   });
 
-  it("新增文件 → 区块随之更新，旧内容消失", () => {
-    fs.writeFileSync(path.join(kb, "旧条目.md"), "旧");
+  it("新增目录 → 区块随之更新，旧目录消失", () => {
+    fs.mkdirSync(path.join(kb, "旧目录"));
+    fs.writeFileSync(path.join(kb, "旧目录", "a.md"), "旧");
     syncAgentConfig(kb, home);
 
-    fs.rmSync(path.join(kb, "旧条目.md"));
-    fs.writeFileSync(path.join(kb, "新条目.md"), "新");
+    fs.rmSync(path.join(kb, "旧目录"), { recursive: true });
+    fs.mkdirSync(path.join(kb, "新目录"));
+    fs.writeFileSync(path.join(kb, "新目录", "a.md"), "新");
     const changes = syncAgentConfig(kb, home);
     expect(changes.every((c) => c.action === "updated")).toBe(true);
 
     const content = fs.readFileSync(claudeFile(), "utf8");
-    expect(content).toContain("新条目");
-    expect(content).not.toContain("旧条目");
+    expect(content).toContain("新目录/（1）");
+    expect(content).not.toContain("旧目录");
+  });
+
+  it("同目录内增删文件只改篇数，不新增行", () => {
+    fs.mkdirSync(path.join(kb, "主题"));
+    fs.writeFileSync(path.join(kb, "主题", "a.md"), "a");
+    syncAgentConfig(kb, home);
+    const before = fs.readFileSync(claudeFile(), "utf8");
+    fs.writeFileSync(path.join(kb, "主题", "b.md"), "b");
+    syncAgentConfig(kb, home);
+    const after = fs.readFileSync(claudeFile(), "utf8");
+    expect(after).toContain("主题/（2）");
+    expect(after.split("\n").length).toBe(before.split("\n").length);
   });
 
   it("写入后不残留临时文件", () => {
@@ -402,23 +335,6 @@ describe("区块内嵌目录树", () => {
     const left = fs.readdirSync(path.join(home, ".claude"));
     expect(left.some((f) => f.includes("knowbase-tmp"))).toBe(false);
     expect(left).toContain("CLAUDE.md");
-  });
-
-  it("空知识库 → 区块走回退文案（与 status 口径一致）", () => {
-    syncAgentConfig(kb, home);
-    const content = fs.readFileSync(claudeFile(), "utf8");
-    expect(content).not.toContain("### 知识库目录树");
-    expect(content).toContain("暂无");
-  });
-});
-
-describe("buildBlock 空树口径", () => {
-  it("空串 / 纯空白树 → 与 null 同样走回退文案", () => {
-    for (const empty of ["", "   \n\t\n"]) {
-      const b = buildBlock("/kb", empty);
-      expect(b).not.toContain("### 知识库目录树");
-      expect(b).toContain("暂无");
-    }
   });
 });
 
@@ -433,7 +349,8 @@ describe("原子写安全性（并发 / 软链）", () => {
   let kb: string;
   beforeEach(() => {
     kb = tmpDir("kb");
-    fs.writeFileSync(path.join(kb, "角色定义.md"), "角色定义与职责");
+    fs.mkdirSync(path.join(kb, "角色定义"));
+    fs.writeFileSync(path.join(kb, "角色定义", "职责.md"), "角色定义与职责");
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -557,39 +474,10 @@ describe("原子写安全性（并发 / 软链）", () => {
 
     // init 建过区块之后 → onlyExisting 正常刷新
     syncAgentConfig(kb, home);
-    fs.writeFileSync(path.join(kb, "新条目.md"), "新条目内容");
+    fs.mkdirSync(path.join(kb, "新条目"));
+    fs.writeFileSync(path.join(kb, "新条目", "a.md"), "新条目内容");
     const refreshed = syncAgentConfig(kb, home, { onlyExisting: true });
     expect(refreshed.find((c) => c.name === "Claude Code")!.action).toBe("updated");
     expect(fs.readFileSync(claudeFile(), "utf8")).toContain("新条目");
-  });
-});
-
-describe("镜像模式区块文案", () => {
-  it("镜像变体：只读声明 + feishu_url 引导 + 平权自主归属，无专属 AI 目录", () => {
-    const block = buildBlock("/kb", null);
-    expect(block).toContain("只读本地镜像");
-    expect(block).toContain("feishu_url");
-    expect(block).toContain("lark-doc");
-    // 产品决策：AI 与人编辑平权，agent 参照目录树自行判断归属，不设专属目录
-    expect(block).toContain("平权");
-    expect(block).toContain("自行判断");
-    expect(block).not.toContain("Agent 沉淀");
-    // 经典文案的「保存即同步」不得出现——那句话在镜像模式下是错误引导
-    expect(block).not.toContain("保存即同步");
-  });
-
-  it("镜像变体：组织/个人内容边界写明", () => {
-    const block = buildBlock("/kb", null);
-    expect(block).toContain("复用价值");
-    expect(block).toContain("个人偏好");
-    expect(block).toContain("不进知识库");
-    expect(block).toContain("询问用户");
-  });
-
-  it("只有镜像一种文案：经典模式的「保存即同步」不得再出现", () => {
-    // 1.0.0 废弃经典模式。这句话在只读镜像下是错误引导——照做会写失败、
-    // 且内容在下个同步周期被丢弃。
-    expect(buildBlock("/kb", "索引内容")).not.toContain("保存即同步");
-    expect(buildBlock("/kb", "索引内容")).toContain("只读本地镜像");
   });
 });

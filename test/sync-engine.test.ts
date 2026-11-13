@@ -94,9 +94,25 @@ describe("refreshAgentPrompts", () => {
 
     // init 建好区块之后，刷新照常生效
     syncAgentConfig(kb, home);
-    fs.writeFileSync(path.join(kb, "新条目.md"), "内容");
+    fs.mkdirSync(path.join(kb, "新条目"));
+    fs.writeFileSync(path.join(kb, "新条目", "a.md"), "内容");
     refreshAgentPrompts(cfg(true), lg, home);
-    expect(fs.readFileSync(claude(), "utf8")).toContain("新条目");
+    expect(fs.readFileSync(claude(), "utf8")).toContain("新条目/（1）");
+  });
+
+  it("知识库 skill 由守护进程补建与刷新：升级后的瘦区块指向它，不能等用户重跑 init", () => {
+    const skill = path.join(home, ".claude", "skills", "knowbase");
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.existsSync(path.join(skill, "SKILL.md"))).toBe(true);
+    fs.writeFileSync(path.join(kb, "新文档.md"), "内容");
+    refreshAgentPrompts(cfg(true), lg, home);
+    expect(fs.readFileSync(path.join(skill, "references", "catalog.md"), "utf8")).toContain("新文档.md");
+    expect(fs.readFileSync(logFile, "utf8")).toContain("知识库 skill 已刷新");
+  });
+
+  it("agentConfig:false → 不写知识库 skill", () => {
+    refreshAgentPrompts(cfg(false), lg, home);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "knowbase"))).toBe(false);
   });
 
   it("区块结束标记缺失 → 记一行说明原因的日志，不动文件", () => {
@@ -121,9 +137,10 @@ describe("refreshAgentPrompts", () => {
     const spy = vi.spyOn(fs, "renameSync").mockImplementation(() => {
       throw new Error("模拟 rename 失败");
     });
-    // 新增文件让目录树内容真正变化，从而触发一次真实写入
-    // （单纯改写已有文件内容不影响树，不会产生新的写盘）
-    fs.writeFileSync(path.join(kb, "触发一次真实写入.md"), "内容");
+    // 新增目录让目录地图内容真正变化，从而触发一次真实写入
+    // （单纯改写已有文件内容不影响地图，不会产生新的写盘）
+    fs.mkdirSync(path.join(kb, "触发一次真实写入"));
+    fs.writeFileSync(path.join(kb, "触发一次真实写入", "a.md"), "内容");
 
     expect(() => refreshAgentPrompts(cfg(true), lg, home)).not.toThrow();
     spy.mockRestore();

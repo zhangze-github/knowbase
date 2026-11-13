@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import {
   Config,
   Logger,
@@ -11,11 +13,16 @@ import {
 import * as git from "./git.js";
 import { createDebouncer, startWatcher } from "./watcher.js";
 import { syncAgentConfig } from "./agent-config.js";
+import { syncKbSkill } from "./kb-skill.js";
 import { syncSkills, summarizeByTool } from "./skills-sync.js";
 import { isMirrorMode, setMirrorLock, discardLocalChanges } from "./mirror.js";
 
 export interface SyncDeps {
   logger: Logger;
+  /** 测试注入：读取磁盘上已安装的版本，默认 installedVersion。 */
+  readVersion?: () => string | null;
+  /** 测试注入：检测到升级后的动作，默认 restartForUpgrade（退出进程）。 */
+  onUpgrade?: () => void;
 }
 
 export interface SyncResult {
@@ -211,12 +218,31 @@ export function refreshAgentPrompts(
     );
     if (touched.length > 0) {
       logger.log(
-        `agent 提示词目录树已刷新：${touched.map((c) => c.name).join(", ")}`
+        `agent 提示词目录地图已刷新：${touched.map((c) => c.name).join(", ")}`
       );
     }
   } catch (e) {
     logger.log(
       `刷新 agent 提示词失败（已忽略）：${e instanceof Error ? e.message : String(e)}`
+    );
+  }
+  // 内置 skill 与区块分开 try：常驻区块已引导 agent 去加载它，任何一边失败都
+  // 不能拖垮另一边。这里没有 onlyExisting：升级后的老用户区块已瘦身、指向这个
+  // skill，必须由后台补建，不能等用户重跑 init。
+  try {
+    for (const c of syncKbSkill(cfg.dir, home, {
+      hermesHome: cfg.hermesHome,
+      larkWriteApp: Boolean(cfg.larkAppId),
+    })) {
+      if (c.action === "created" || c.action === "updated") {
+        logger.log(`知识库 skill 已刷新（${c.tool}）：${c.dir}`);
+      } else if (c.action === "foreign" || c.action === "failed") {
+        logger.log(`知识库 skill 未写入（${c.tool}，${c.action}）：${c.reason}`);
+      }
+    }
+  } catch (e) {
+    logger.log(
+      `刷新知识库 skill 失败（已忽略）：${e instanceof Error ? e.message : String(e)}`
     );
   }
 }
@@ -271,6 +297,10 @@ export function refreshOrgSkills(
  */
 export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
   const { logger } = deps;
+
+  // 升级重启（Windows）：旧实例拉起本实例后才退出，先等它退干净再做单实例检查
+  const waitPid = Number(process.env.KNOWBASE_WAIT_PID);
+  if (Number.isInteger(waitPid) && waitPid > 0) await waitForPidExit(waitPid, 10000);
 
   // 单实例保护：手动 `knowbase daemon` 与服务管理器拉起的实例并存时，
   // 双方会互踩状态文件、无谓竞争 git 锁。后来者直接退出。
@@ -343,9 +373,67 @@ export async function runDaemon(cfg: Config, deps: SyncDeps): Promise<void> {
       `interval=${cfg.interval}s watch=${watching ? "on" : "off"}`
   );
 
+  const runningVersion = (deps.readVersion ?? installedVersion)();
   // eslint-disable-next-line no-constant-condition
   while (true) {
     runCycle();
     await sleep(Math.max(1, cfg.interval) * 1000);
+    const onDisk = (deps.readVersion ?? installedVersion)();
+    if (upgradeDetected(runningVersion, onDisk)) {
+      logger.log(`检测到 knowbase 已升级（${runningVersion} → ${onDisk}），重启守护进程以加载新版本`);
+      (deps.onUpgrade ?? restartForUpgrade)();
+      return;
+    }
   }
+}
+
+/** 包根目录的 package.json：dist/ 与 src/ 下都是上一级。 */
+const PACKAGE_JSON = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+
+/** 磁盘上当前安装的版本；读不到（非常规安装方式、npm 正在替换文件）返回 null。 */
+export function installedVersion(file: string = PACKAGE_JSON): string | null {
+  try {
+    const v = JSON.parse(fs.readFileSync(file, "utf8"))?.version;
+    return typeof v === "string" && v !== "" ? v : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 是否需要为升级重启：启动时与磁盘上的版本都读得到且不同。
+ *
+ * 为什么需要：`npm i -g knowbase` 只替换磁盘上的文件，常驻的守护进程仍在执行
+ * 内存里的旧代码，直到重启或重新登录才会加载新版本——成员「升级了」，提示词和
+ * skill 却还是旧版的。任一侧读不到都不重启：宁可晚一点生效，也不因读文件抖动
+ * 反复重启。
+ */
+export function upgradeDetected(running: string | null, onDisk: string | null): boolean {
+  return running !== null && onDisk !== null && running !== onDisk;
+}
+
+/**
+ * 退出当前进程，让新版本接管。
+ *
+ * launchd（KeepAlive）与 systemd（Restart=always）会在退出后自动拉起新进程，
+ * 直接退出即可。Windows 计划任务只在登录时启动一次、不会重启，所以先拉起一个
+ * 脱离的新实例，并通过 KNOWBASE_WAIT_PID 让它等本进程退出后再过单实例检查。
+ */
+export function restartForUpgrade(): never {
+  if (process.platform === "win32") {
+    const child = spawn(process.execPath, [process.argv[1] ?? "", "daemon"], {
+      detached: true,
+      stdio: "ignore",
+      windowsHide: true,
+      env: { ...process.env, KNOWBASE_WAIT_PID: String(process.pid) },
+    });
+    child.unref();
+  }
+  process.exit(0);
+}
+
+/** 新实例启动时等待被替换的旧实例退出，最多等 timeoutMs。 */
+async function waitForPidExit(pid: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (pidAlive(pid) && Date.now() < deadline) await sleep(200);
 }

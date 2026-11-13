@@ -9,6 +9,7 @@ import {
 } from "../config.js";
 import { getAutostart } from "../platform/index.js";
 import { uninstallAgentConfig } from "../agent-config.js";
+import { uninstallKbSkill } from "../kb-skill.js";
 import { uninstallSkills } from "../skills-sync.js";
 import { isMirrorMode, setMirrorLock } from "../mirror.js";
 import { LARK_WRITE_PROFILE, removeLarkWriteProfile } from "../lark-write-app.js";
@@ -76,6 +77,16 @@ export function cmdUninstall(): number {
     }
   } catch (e) {
     console.warn(`⚠ 移除 agent 提示词区块时出错：${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // 移除内置知识库 skill（同名但不是 knowbase 建的目录不碰）
+  try {
+    for (const r of uninstallKbSkill(undefined, hermesHome)) {
+      if (r.removed) console.log(`• 已移除 ${r.tool} 知识库 skill：${r.dir}`);
+      else console.warn(`⚠ 未能移除 ${r.dir}：${r.error ?? "未知原因"}，请手动删除`);
+    }
+  } catch (e) {
+    console.warn(`⚠ 移除知识库 skill 时出错：${e instanceof Error ? e.message : String(e)}`);
   }
 
   // 移除分发到各生效目标的团队 skills 副本（无托管标记的目录一律不碰）

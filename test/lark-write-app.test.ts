@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpDir, makeMirrorOrigin } from "./helpers.js";
 import { buildBlock } from "../src/agent-config.js";
+import { buildSkillMd } from "../src/kb-skill.js";
 import { refreshAgentPrompts } from "../src/sync-engine.js";
 import { Logger, type Config } from "../src/config.js";
 
@@ -71,6 +72,7 @@ function emptyLarkPath(): string {
 const cfgPath = () => path.join(home, ".config", "knowbase", "config.json");
 const readCfg = () => JSON.parse(fs.readFileSync(cfgPath(), "utf8"));
 const claudeMd = () => fs.readFileSync(path.join(home, ".claude", "CLAUDE.md"), "utf8");
+const kbSkill = (rel = "SKILL.md") => fs.readFileSync(path.join(home, ".claude", "skills", "knowbase", rel), "utf8");
 const larkCalls = () => (fs.existsSync(calls) ? fs.readFileSync(calls, "utf8") : "");
 
 beforeEach(() => {
@@ -97,10 +99,10 @@ describe("init 传入飞书写入应用", () => {
       `init config init --app-id cli_abc --app-secret-stdin --name knowbase-writer stdin=${SECRET}`
     );
     expect(readCfg().larkAppId).toBe("cli_abc");
-    expect(claudeMd()).toContain("--profile knowbase-writer --as bot");
+    expect(kbSkill()).toContain("--profile knowbase-writer --as bot");
 
     const logFile = path.join(home, ".config", "knowbase", "knowbase.log");
-    for (const text of [fs.readFileSync(cfgPath(), "utf8"), claudeMd(), r.out, fs.readFileSync(logFile, "utf8")]) {
+    for (const text of [fs.readFileSync(cfgPath(), "utf8"), claudeMd(), kbSkill(), r.out, fs.readFileSync(logFile, "utf8")]) {
       expect(text).not.toContain(SECRET);
     }
   });
@@ -169,7 +171,7 @@ describe("init 传入飞书写入应用", () => {
     expect(knowbase(["init", bare, "--dir", kb, "--app-id", "cli_abc", "--app-secret", SECRET]).code).toBe(0);
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
     expect(readCfg().larkAppId).toBe("cli_abc");
-    expect(claudeMd()).toContain("knowbase-writer");
+    expect(kbSkill()).toContain("knowbase-writer");
   });
 
   it("status 显示写入身份，uninstall 清除 profile", () => {
@@ -205,9 +207,10 @@ describe("init 传入飞书写入应用", () => {
 describe("提示词中的写入身份", () => {
   it("默认不出现，开启后位于写入规则内", () => {
     expect(buildBlock("/kb")).not.toContain("--as bot");
-    const b = buildBlock("/kb", null, true);
+    expect(buildSkillMd("/kb", 1)).not.toContain("--as bot");
+    const b = buildSkillMd("/kb", 1, true);
     expect(b).toContain("--profile knowbase-writer --as bot");
-    expect(b.indexOf("写入身份")).toBeGreaterThan(b.indexOf("**写（重要"));
+    expect(b.indexOf("写入身份")).toBeGreaterThan(b.indexOf("## 写入"));
   });
 
   it("守护进程周期刷新不会把应用身份改回个人身份", () => {
@@ -216,8 +219,7 @@ describe("提示词中的写入身份", () => {
     fs.chmodSync(path.join(kb, "docs"), 0o755);
     fs.writeFileSync(path.join(kb, "docs", "new.md"), "# 新文档\n");
     refreshAgentPrompts(cfg, new Logger(path.join(root, "t.log")), home);
-    const md = claudeMd();
-    expect(md).toContain("new.md");
-    expect(md).toContain("--profile knowbase-writer --as bot");
+    expect(kbSkill("references/catalog.md")).toContain("new.md");
+    expect(kbSkill()).toContain("--profile knowbase-writer --as bot");
   });
 });

@@ -111,6 +111,12 @@ ${envBlock}  <key>RunAtLoad</key>
     }
   }
 
+  restart(): void {
+    // -k：先杀掉正在运行的实例再启动，KeepAlive 不会因此多拉起一个
+    const r = launchctl("kickstart", "-k", `${domainTarget()}/${LABEL}`);
+    if (r.code !== 0) throw new Error(`launchctl kickstart 失败：${r.out.trim()}`);
+  }
+
   isInstalled(): boolean {
     if (!fs.existsSync(plistPath())) return false;
     const r = launchctl("print", `${domainTarget()}/${LABEL}`);

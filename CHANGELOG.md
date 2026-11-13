@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 (2026-11-13)
+
+- **常驻提示词瘦身**：注入 Claude Code / Codex / Cursor / Hermes 的托管区块只保留知识库位置、何时查、怎么查、只读约束和目录地图（只列目录与篇数，预算 1.5KB，在预算内自动选展开层数），大小不再随文档数增长。110 篇的知识库从约 9.9KB 降到约 2.2KB。区块写明「说知识库里没有之前，必须中英文、同义词各搜一轮」。
+- **新增内置 skill `knowbase`**：完整文件目录（`references/catalog.md`，不折叠，超 48KB 按顶层目录拆分）、检索方法、写入流程（含飞书应用身份规则）、沉淀标准与团队 skill 维护方式移入 skill，按需加载。分发到与团队 skills 相同的客户端目录，目录名不带 `org-` 前缀；守护进程每个周期补建与刷新，`uninstall` 一并移除，同名的非托管目录不覆盖。
+- `status` 改为报告目录地图的规模与展开层数，以及各客户端内置 skill 的安装情况。
+- **升级即生效**：`npm i -g knowbase` 后自动重启后台守护进程（npm postinstall 调用隐藏命令 `daemon-restart`，只在全局安装且已注册自启时执行，失败只提示、不影响安装）；守护进程每个周期比对磁盘上的版本，发现升级后自行退出由服务管理器重新拉起（Windows 由旧进程拉起新实例）。从 1.2.x 及更早版本升级无需重跑 `init`，老区块会被替换为新区块，内置 skill 自动补建。
+- 新增回归测试：客户端目录下没有 `skills/`、甚至没有 `~/.claude` 时，首次同步自动创建目录；`skills/` 被整个删除后下个周期重建。
+
 ## 1.2.0 (2026-11-04)
 
 - `init` 支持 `--app-id` / `--app-secret`（或 `KNOWBASE_LARK_APP_ID` / `KNOWBASE_LARK_APP_SECRET`）传入飞书应用：凭证写入 lark-cli 专用 profile `knowbase-writer`，agent 提示词引导用应用身份写知识库，供没有个人飞书身份的平台接入；`uninstall` 一并清除凭证。

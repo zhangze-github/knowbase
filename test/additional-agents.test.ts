@@ -24,7 +24,7 @@ function source(content = "Run team workflow") {
 beforeEach(() => {
   home = tmpDir("extra agents ' $ home");
   kb = path.join(home, "org-kb");
-  write(path.join(kb, "team.md"), "Team facts\n");
+  write(path.join(kb, "team/team.md"), "Team facts\n");
   vi.stubEnv("HERMES_HOME", "");
 });
 afterEach(() => {
@@ -108,13 +108,13 @@ describe("Cursor / Hermes context lifecycle", () => {
     const cursorRule = path.join(home, ".cursor/knowbase/plugin/rules/knowbase.mdc");
     for (const file of [...initial.map(c => c.file), cursorRule]) {
       const prompt = fs.readFileSync(file, "utf8");
-      fs.writeFileSync(file, prompt.replace("team.md", "skills/\n  old-team-skill/\n    SKILL.md\nteam.md"));
+      fs.writeFileSync(file, prompt.replace("team/（1）", "skills/\n  old-team-skill/\n    SKILL.md\nteam/（1）"));
     }
     const changes = syncAgentConfig(kb, home, { onlyExisting: true });
     expect(changes.map(c => c.name)).toEqual(["Claude Code", "Codex", "Cursor", "Hermes"]);
     for (const c of changes) {
       const prompt = fs.readFileSync(c.file, "utf8");
-      expect(prompt).toContain("team.md");
+      expect(prompt).toContain("team/（1）");
       expect(prompt).not.toMatch(/^skills\/$/m);
       expect(prompt).not.toContain("SKILL.md");
       expect(prompt).not.toContain("deploy/");
@@ -144,11 +144,11 @@ describe("Cursor / Hermes context lifecycle", () => {
     const rule = fs.readFileSync(path.join(plugin, "rules/knowbase.mdc"), "utf8");
     expect(rule).toMatch(/^---\nalwaysApply: true\n---\n/);
     expect(rule).toContain(kb);
-    expect(rule).toContain("team.md");
+    expect(rule).toContain("team/（1）");
     expect(syncAgentConfig(kb, home).every(c => c.action === "unchanged")).toBe(true);
-    write(path.join(kb, "new.md"), "New facts");
+    write(path.join(kb, "new/new.md"), "New facts");
     syncAgentConfig(kb, home, { onlyExisting: true });
-    expect(fs.readFileSync(path.join(plugin, "rules/knowbase.mdc"), "utf8")).toContain("new.md");
+    expect(fs.readFileSync(path.join(plugin, "rules/knowbase.mdc"), "utf8")).toContain("new/（1）");
     uninstallAgentConfig(home);
     expect(JSON.parse(fs.readFileSync(hooksFile, "utf8"))).toEqual({ version: 1, extra: true, hooks: { workspaceOpen: [{ command: "echo personal" }], stop: [{ command: "echo done" }] } });
     expect(fs.existsSync(plugin)).toBe(false);
@@ -204,7 +204,7 @@ describe("Cursor / Hermes context lifecycle", () => {
     expect(cursor).toBeDefined();
     write(path.join(home, ".cursor/hooks.json"), '{"version":1,"hooks":{}}');
     fs.rmSync(cursor.file);
-    write(path.join(kb, "new.md"), "New facts");
+    write(path.join(kb, "new/new.md"), "New facts");
     syncAgentConfig(kb, home, { onlyExisting: true });
     expect(fs.existsSync(cursor.file)).toBe(false);
     expect(JSON.parse(fs.readFileSync(path.join(home, ".cursor/hooks.json"), "utf8")).hooks).toEqual({});

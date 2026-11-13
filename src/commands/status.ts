@@ -12,7 +12,8 @@ import {
 import * as git from "../git.js";
 import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
-import { readKbTree, TREE_MAX_BYTES } from "../agent-config.js";
+import { readKbMap, MAP_MAX_BYTES } from "../agent-config.js";
+import { kbSkillStatus } from "../kb-skill.js";
 import { additionalAgentConfigStatus } from "../agent-integrations.js";
 import { LARK_WRITE_PROFILE } from "../lark-write-app.js";
 import {
@@ -127,21 +128,26 @@ export function cmdStatus(): number {
   if (cfg.agentConfig === false) {
     console.log("agent 提示词：已关闭（init 时用了 --no-agent-config）");
   } else {
-    const tree = readKbTree(cfg.dir);
-    if (tree.files === 0) {
+    const map = readKbMap(cfg.dir);
+    if (map.files === 0) {
       // 不计入 anomalies：knowbase 不生成也不播种任何文件，「知识库还没有文件」
       // 是每个团队 day one 的正常状态，计入会让 status 永久非零退出、
       // 把拿退出码做监控的包装脚本永久标红。
-      console.log("agent 提示词：已启用；知识库暂无文件，区块中提示 agent 直接 grep 全库");
+      console.log("agent 提示词：已启用；知识库暂无文件，区块中提示 agent 直接 rg 全库");
     } else {
-      const kbSize = (tree.bytes / 1024).toFixed(1);
-      const note = tree.truncated ? `，超 ${TREE_MAX_BYTES / 1024}KB 已截断` : "";
-      // 折叠是常态而非异常（目录一宽就会发生），但必须可见：否则用户无从知道
-      // 注入给 agent 的树并不是完整清单。
-      const fold = tree.hidden > 0 ? `，其中 ${tree.hidden} 篇因目录过宽已折叠` : "";
+      const note = map.truncated ? `，超 ${(MAP_MAX_BYTES / 1024).toFixed(1)}KB 已截断` : "";
       console.log(
-        `agent 提示词：已注入目录树（${tree.files} 个文件${fold}，${kbSize}KB${note}）`
+        `agent 提示词：已注入目录地图（${map.files} 个文件、${map.dirs} 个目录，展开到第 ${map.depth} 层${note}）；完整目录在知识库 skill 中`
       );
+    }
+    // 常驻区块指引 agent 去加载这个 skill；缺了它写入流程与完整目录就无处可查，必须可见。
+    for (const s of kbSkillStatus(undefined, cfg.hermesHome)) {
+      const state = s.installed
+        ? "已安装"
+        : s.foreign
+          ? "同名目录不是 knowbase 托管的，未覆盖"
+          : "未安装（守护进程下个周期补建，或重跑 init）";
+      console.log(`知识库 skill（${s.tool}）：${state}`);
     }
   }
 

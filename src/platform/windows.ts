@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { configDir } from "../config.js";
+import { configDir, pidAlive, readDaemonState } from "../config.js";
 import { Autostart, selfInvocation } from "./index.js";
 
 const TASK = "knowbase";
@@ -66,6 +66,26 @@ export class WindowsAutostart implements Autostart {
     } catch {
       // ignore
     }
+  }
+
+  restart(): void {
+    // 计划任务启动的是 VBS 启动器，它拉起 node 后立即退出；/End 管不到真正的
+    // 守护进程，只能按状态文件里的 pid 结束它，再让任务重新拉起新版本。
+    const pid = readDaemonState()?.pid;
+    if (pid && pidAlive(pid)) {
+      try {
+        process.kill(pid);
+      } catch {
+        // 已退出
+      }
+      // 等旧进程真正退出：新实例启动时若旧 pid 仍存活，会被单实例保护直接退出
+      const sleeper = new Int32Array(new SharedArrayBuffer(4));
+      for (let i = 0; i < 50 && pidAlive(pid); i++) Atomics.wait(sleeper, 0, 0, 100);
+    }
+    // 重写启动器：node / 脚本路径可能随升级变化
+    this.writeLauncher();
+    const r = schtasks("/Run", "/TN", TASK);
+    if (r.code !== 0) throw new Error(`schtasks /Run 失败：${r.out.trim()}`);
   }
 
   isInstalled(): boolean {

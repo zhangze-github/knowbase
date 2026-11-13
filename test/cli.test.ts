@@ -305,7 +305,9 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
 
     expect(knowbase(["init", bare, "--dir", kb, "--no-skills"]).code).toBe(0);
     expect(JSON.parse(fs.readFileSync(cfgPath, "utf8")).skills).toBe(false);
-    expect(fs.existsSync(path.join(home, ".claude", "skills"))).toBe(false);
+    // --no-skills 只关团队 skills；内置知识库 skill 属于 agent 提示词配置，照常写入
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "org-demo"))).toBe(false);
+    expect(fs.existsSync(path.join(home, ".claude", "skills", "knowbase", "SKILL.md"))).toBe(true);
 
     // 默认 init（复用同目录）→ 开关回到 true 且补上分发
     expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
@@ -361,10 +363,12 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
     const attention = missing.out.split("需要注意：")[1] ?? "";
     expect(attention).not.toContain("知识库暂无文件");
 
-    // 有文件 → 报告文件数与体积
-    fs.writeFileSync(path.join(kb, "笔记.md"), "# 笔记\n- 角色/\n");
+    // 有文件 → 报告文件数、目录数与展开层数，以及知识库 skill 的安装情况
+    fs.mkdirSync(path.join(kb, "笔记"));
+    fs.writeFileSync(path.join(kb, "笔记", "a.md"), "# 笔记\n");
     const injected = knowbase(["status"]);
-    expect(injected.out).toMatch(/agent 提示词：已注入目录树（1 个文件，[\d.]+KB）/);
+    expect(injected.out).toMatch(/agent 提示词：已注入目录地图（1 个文件、1 个目录，展开到第 1 层）/);
+    expect(injected.out).toContain("知识库 skill（Claude Code）：");
 
     // 关闭开关 → 报告已关闭
     expect(knowbase(["init", bare, "--dir", kb, "--no-agent-config"]).code).toBe(0);
@@ -554,8 +558,9 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
       fs.writeFileSync(claude, "# 全局偏好\n始终用中文回答。\n");
 
       expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
-      // 目录树里出现区块结束标记字样的文件名（例如某篇文档标题恰好如此）
-      fs.writeFileSync(path.join(kb, "KNOWBASE:END.md"), "内容");
+      // 目录地图里出现区块结束标记字样的目录名（例如某个飞书节点标题恰好如此）
+      fs.mkdirSync(path.join(kb, "KNOWBASE:END"));
+      fs.writeFileSync(path.join(kb, "KNOWBASE:END", "a.md"), "内容");
       expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
 
       const withBlock = fs.readFileSync(claude, "utf8");
@@ -566,7 +571,7 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
       const after = fs.readFileSync(claude, "utf8");
       expect(after).toContain("始终用中文回答");
       expect(after).not.toContain("KNOWBASE");
-      expect(after).not.toContain("KNOWBASE:END.md");
+      expect(after).not.toContain("KNOWBASE:END/");
     }
   );
 
@@ -637,4 +642,30 @@ describe("CLI 端到端（真实运行 dist/cli.js）", () => {
   });
 });
 
+describe("升级后重启守护进程", () => {
+  const POSTINSTALL = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "scripts", "postinstall.cjs");
 
+  it.skipIf(process.platform === "win32")("daemon-restart：未接入或未注册自启时静默成功", () => {
+    const none = knowbase(["daemon-restart"]);
+    expect(none.code).toBe(0);
+    expect(none.out.trim()).toBe("");
+
+    const kb = path.join(root, "kb");
+    expect(knowbase(["init", bare, "--dir", kb]).code).toBe(0);
+    // KNOWBASE_SKIP_AUTOSTART=1 → 沙盒 HOME 里没有服务定义，不会去碰本机真实服务
+    const r = knowbase(["daemon-restart"]);
+    expect(r.code).toBe(0);
+    expect(r.out.trim()).toBe("");
+  });
+
+  it("postinstall：非全局安装、或显式跳过自启时什么都不做，并且总是成功", () => {
+    for (const env of [{ npm_config_global: "" }, { npm_config_global: "true", KNOWBASE_SKIP_AUTOSTART: "1" }]) {
+      const r = spawnSync("node", [POSTINSTALL], {
+        encoding: "utf8",
+        env: { ...process.env, HOME: home, XDG_CONFIG_HOME: path.join(home, ".config"), ...env },
+      });
+      expect(r.status).toBe(0);
+      expect((r.stdout ?? "") + (r.stderr ?? "")).toBe("");
+    }
+  });
+});
