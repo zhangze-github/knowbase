@@ -12,7 +12,7 @@ import {
 import * as git from "../git.js";
 import { isMirrorMode, readMirrorManifest, mirrorFreshness } from "../mirror.js";
 import { getAutostart } from "../platform/index.js";
-import { readKbMap, MAP_MAX_BYTES } from "../agent-config.js";
+import { readKbMap, MAP_MAX_BYTES, opencodeStatus } from "../agent-config.js";
 import { kbSkillStatus } from "../kb-skill.js";
 import { additionalAgentConfigStatus } from "../agent-integrations.js";
 import { LARK_WRITE_PROFILE } from "../lark-write-app.js";
@@ -152,6 +152,8 @@ export function cmdStatus(): number {
   }
 
   if (cfg.agentConfig !== false) {
+    const opencode = opencodeStatus();
+    if (opencode) console.log(`知识库上下文（OpenCode）：${opencode}`);
     for (const s of additionalAgentConfigStatus(undefined, cfg.hermesHome)) {
       console.log(`知识库上下文（${s.name}）：${s.state}`);
       if (s.error) anomalies.push(`${s.name} 知识库上下文配置异常：${s.error}`);

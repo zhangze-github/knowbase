@@ -326,7 +326,7 @@ export function cmdInit(url: string, opts: InitOptions): number {
     }
   }
 
-  console.log("\n✓ 接入完成。支持 Claude Code / Codex / Cursor（桌面版与 CLI）/ Hermes；具体配置结果见上方。");
+  console.log("\n✓ 接入完成。支持 Claude Code / Codex / OpenCode / Cursor（桌面版与 CLI）/ Hermes；具体配置结果见上方。");
   console.log("  运行 `knowbase status` 查看健康度。");
   logger.log(`init 完成：dir=${dir} url=${url} branch=${branch}`);
   return 0;

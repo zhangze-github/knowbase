@@ -10,6 +10,8 @@ import {
   syncAgentConfig,
   uninstallAgentConfig,
   agentTargets,
+  opencodeConfigDir,
+  opencodeStatus,
   readKbMap,
   MAP_MAX_BYTES,
   MAP_MAX_DEPTH,
@@ -107,7 +109,43 @@ describe("syncAgentConfig / uninstallAgentConfig", () => {
     expect(t.map((x) => x.file)).toEqual([
       path.join(home, ".claude", "CLAUDE.md"),
       path.join(home, ".codex", "AGENTS.md"),
+      path.join(home, ".config", "opencode", "AGENTS.md"),
     ]);
+  });
+
+  it("OpenCode：无全局 AGENTS.md 时不新建（保留 CLAUDE.md 回退）", () => {
+    fs.mkdirSync(path.join(home, ".config", "opencode"), { recursive: true });
+    const changes = syncAgentConfig("/Users/x/knowledge-base", home);
+    expect(changes.find((c) => c.name === "OpenCode")).toBeUndefined();
+    expect(fs.existsSync(path.join(home, ".config", "opencode", "AGENTS.md"))).toBe(false);
+    expect(opencodeStatus(home)).toContain("回退");
+  });
+
+  it("OpenCode：已有全局 AGENTS.md 时写入区块并可卸载", () => {
+    const file = path.join(home, ".config", "opencode", "AGENTS.md");
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, "# 我的规则\n");
+    expect(syncAgentConfig("/Users/x/knowledge-base", home).find((c) => c.name === "OpenCode")!.action).toBe("updated");
+    expect(fs.readFileSync(file, "utf8")).toContain("# 我的规则");
+    expect(fs.readFileSync(file, "utf8")).toContain(BLOCK_START);
+    expect(opencodeStatus(home)).toContain("已写入");
+    // 守护进程只刷新已有区块
+    expect(syncAgentConfig("/Users/x/knowledge-base", home, { onlyExisting: true }).find((c) => c.name === "OpenCode")!.action).toBe("unchanged");
+    uninstallAgentConfig(home);
+    expect(fs.readFileSync(file, "utf8")).toBe("# 我的规则\n");
+  });
+
+  it("OpenCode：未安装时 status 不显示", () => {
+    expect(opencodeStatus(home)).toBeNull();
+  });
+
+  it("opencodeConfigDir 固定为 ~/.config/opencode，不受 XDG_CONFIG_HOME 影响", () => {
+    vi.stubEnv("XDG_CONFIG_HOME", "/xdg");
+    try {
+      expect(opencodeConfigDir(home)).toBe(path.join(home, ".config", "opencode"));
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
 

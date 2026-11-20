@@ -2,7 +2,7 @@
 
 > 以飞书知识库为唯一真相源的团队知识镜像。**安装即忘**：一条命令接入，开机自启，后台自动把飞书内容同步成本地只读 Markdown，人和 AI 都能直接 grep。
 
-面向重度使用 Claude Code / Codex / Cursor / Hermes 等 agent 的团队：组织的业务背景、历史决策、环境配置等**隐性知识**写在飞书知识库里（人的习惯不用改），knowbase 在每个成员本机维护一份只读镜像，让 agent 能零延迟、无外网依赖地 grep 到这些知识。
+面向重度使用 Claude Code / Codex / OpenCode / Cursor / Hermes 等 agent 的团队：组织的业务背景、历史决策、环境配置等**隐性知识**写在飞书知识库里（人的习惯不用改），knowbase 在每个成员本机维护一份只读镜像，让 agent 能零延迟、无外网依赖地 grep 到这些知识。
 
 **读走本地，写走飞书。** 本地目录是镜像，不是副本——所有 `.md` 设为只读，任何本地改动都会在下个同步周期被丢弃。要改知识，用文件头 frontmatter 里的 `feishu_url` 去飞书编辑，几分钟内自动回流到所有人本机。
 
@@ -34,7 +34,7 @@ knowbase status
 
 | 命令 | 作用 |
 |---|---|
-| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--no-agent-config] [--no-skills]` | 一次性接入，注册开机自启，并配置 Claude Code / Codex / Cursor / Hermes 知识库上下文 |
+| `knowbase init <git-url> [--dir <path>] [--branch <b>] [--interval <秒>] [--no-agent-config] [--no-skills]` | 一次性接入，注册开机自启，并配置 Claude Code / Codex / OpenCode / Cursor / Hermes 知识库上下文 |
 | `knowbase status` | 一屏健康度：守护进程 / 上次同步 / 本地改动丢弃记录 / 远端连通性 |
 | `knowbase sync` | 立即从镜像拉取一次（前台输出，不必等轮询；也用于排查） |
 | `knowbase exporter` | 飞书 → 仓库的导出守护进程（部署在服务器侧，见下文） |
@@ -67,10 +67,11 @@ knowbase status
 |---|---|
 | Claude Code | `~/.claude/CLAUDE.md` |
 | Codex | `~/.codex/AGENTS.md` |
+| OpenCode | 已有全局 `~/.config/opencode/AGENTS.md`时写入该文件；没有时不新建，OpenCode 会回退读取 `~/.claude/CLAUDE.md` 中的区块 |
 | Cursor 桌面版 / CLI | 全局 `~/.cursor/hooks.json` 的 `workspaceOpen` hook 加载 `~/.cursor/knowbase/plugin/` 中的知识库规则 |
 | Hermes | `~/.hermes/plugins/knowbase-context/` 注入系统提示词；支持自定义 `HERMES_HOME` |
 
-Claude Code / Codex 使用全局 Markdown 文件；Cursor 和 Hermes 仅在检测到已安装客户端时配置官方 hook / 插件入口，不会在未安装的机器上创建其配置目录。已有用户升级后，重新执行原来的 `knowbase init <git-url>` 完成新客户端接入；后台只刷新既有上下文。Cursor 重新打开工作区后加载规则，Hermes 启动新会话（使用常驻 gateway 时重启 gateway）后生效。
+Claude Code / Codex 使用全局 Markdown 文件；OpenCode 刻意不新建全局 `AGENTS.md`——一旦存在，OpenCode 就不再回退读取 `~/.claude/CLAUDE.md`，你写在其中的个人指令会对 OpenCode 失效；之后自己新建了它，重跑 `init` 即可接入。只识别默认的 `~/.config/opencode`（不跟随 `XDG_CONFIG_HOME`，避免守护进程与交互终端解析出不同路径），自定义了 XDG 的会经 `CLAUDE.md` 回退加载。OpenCode 原生扫描 `~/.claude/skills/`，团队 skills 与内置 skill 无需另行分发（设置了 `OPENCODE_DISABLE_CLAUDE_CODE=1` 时会读不到）。Cursor 和 Hermes 仅在检测到已安装客户端时配置官方 hook / 插件入口，不会在未安装的机器上创建其配置目录。已有用户升级后，重新执行原来的 `knowbase init <git-url>` 完成新客户端接入；后台只刷新既有上下文。Cursor 重新打开工作区后加载规则，Hermes 启动新会话（使用常驻 gateway 时重启 gateway）后生效。
 
 Cursor 需要支持 `workspaceOpen` / `pluginPaths` 的版本（沙盒验证使用 CLI `2026.10.16-e3cb207`）；Hermes 需要支持 `register_system_prompt_section` 的插件 API。Hermes 的 `plugins.disabled` 显式禁用会保留，个人 `SOUL.md` 不修改。Hermes 插件上下文最多 4,000 字符，常驻区块远低于这个上限。已有 JSON / YAML 无效或同名目录非托管时会提示并跳过，不覆盖原配置。
 

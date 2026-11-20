@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.4.0 (2026-11-20)
+
+- **支持 OpenCode**：已有全局 `~/.config/opencode/AGENTS.md`时写入知识库托管区块，守护进程刷新、`uninstall` 移除；没有时不新建，以保留 OpenCode 对 `~/.claude/CLAUDE.md` 的回退读取。skills 由 OpenCode 原生扫描 `~/.claude/skills/` 获得，不重复分发。`status` 显示 OpenCode 接入方式。
+
 ## 1.3.0 (2026-11-13)
 
 - **常驻提示词瘦身**：注入 Claude Code / Codex / Cursor / Hermes 的托管区块只保留知识库位置、何时查、怎么查、只读约束和目录地图（只列目录与篇数，预算 1.5KB，在预算内自动选展开层数），大小不再随文档数增长。110 篇的知识库从约 9.9KB 降到约 2.2KB。区块写明「说知识库里没有之前，必须中英文、同义词各搜一轮」。

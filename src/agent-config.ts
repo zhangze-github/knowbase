@@ -18,6 +18,21 @@ export interface AgentTarget {
   name: string;
   /** 全局提示词文件绝对路径。 */
   file: string;
+  /**
+   * 只在文件已存在时写入，绝不新建。OpenCode 用：没有全局 AGENTS.md 时它回退读取
+   * ~/.claude/CLAUDE.md（区块已在其中）；替用户新建 AGENTS.md 会让这个回退失效，
+   * 用户写在 CLAUDE.md 里的个人指令从此对 OpenCode 不可见。
+   */
+  onlyIfExists?: boolean;
+}
+
+/**
+ * OpenCode 的全局配置目录，固定为 ~/.config/opencode。
+ * 刻意不读 XDG_CONFIG_HOME：init 在交互 shell 里跑、守护进程与 uninstall 未必继承
+ * 同样的环境变量，各进程解析出不同路径会导致区块刷新不到、卸载时残留。
+ */
+export function opencodeConfigDir(home: string = os.homedir()): string {
+  return path.join(home, ".config", "opencode");
 }
 
 /** 各 agent 的全局提示词文件位置。 */
@@ -25,7 +40,36 @@ export function agentTargets(home: string = os.homedir()): AgentTarget[] {
   return [
     { name: "Claude Code", file: path.join(home, ".claude", "CLAUDE.md") },
     { name: "Codex", file: path.join(home, ".codex", "AGENTS.md") },
+    {
+      name: "OpenCode",
+      file: path.join(opencodeConfigDir(home), "AGENTS.md"),
+      onlyIfExists: true,
+    },
   ];
+}
+
+/**
+ * OpenCode 接入状态；未检测到 OpenCode 配置目录时返回 null。
+ * skills 不单独分发：OpenCode 原生扫描 ~/.claude/skills，团队 skills 与内置 skill 已在其中，
+ * 再复制一份到 ~/.config/opencode/skills 只会产生同 ID 覆盖。
+ */
+export function opencodeStatus(home: string = os.homedir()): string | null {
+  const dir = opencodeConfigDir(home);
+  try {
+    if (!fs.statSync(dir).isDirectory()) return null;
+  } catch {
+    return null;
+  }
+  const file = path.join(dir, "AGENTS.md");
+  let content: string;
+  try {
+    content = fs.readFileSync(file, "utf8");
+  } catch {
+    return "经 ~/.claude/CLAUDE.md 回退加载（无全局 AGENTS.md）；skills 经 ~/.claude/skills 加载";
+  }
+  return content.includes(BLOCK_START)
+    ? `已写入 ${file}；skills 经 ~/.claude/skills 加载`
+    : `${file} 中无知识库区块；运行 knowbase init 接入`;
 }
 
 /** 内置 skill 的目录名与 name：完整目录、检索方法与写入流程都在这里，按需加载。 */
@@ -334,6 +378,7 @@ export function syncAgentConfig(
   const changes: AgentConfigChange[] = [];
   for (const t of agentTargets(home)) {
     const existed = fs.existsSync(t.file);
+    if (t.onlyIfExists && !existed) continue;
     // 读取用原路径：读操作穿透软链，语义正确。
     const prev = existed ? fs.readFileSync(t.file, "utf8") : "";
     if (opts.onlyExisting && !prev.includes(BLOCK_START)) {
